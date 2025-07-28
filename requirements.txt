@@ -5,9 +5,16 @@ selenium
 selenium-wire
 
 # For data validation and elegant settings management
-# Note: Aurakin used the 'pydantic-settings' variant in its latest code
 pydantic-settings
 blinker==1.7.0
 packaging
 brotli
 setuptools
+
+# For creating the API to serve our data
+fastapi
+
+# The server that runs our FastAPI application
+uvicorn
+pytest
+httpx
