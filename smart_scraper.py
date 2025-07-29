@@ -15,7 +15,9 @@ class TenipoScraper:
     def __init__(self, settings: config.Settings):
         self.settings = settings
         self.driver: webdriver.Chrome = self._setup_driver()
-        logging.info("TenipoScraper (Selenium) initialized.")
+        # The page load ensures the site's JavaScript (including the decoder) is ready.
+        self.driver.get(str(self.settings.LIVESCORE_PAGE_URL))
+        logging.info("TenipoScraper (Selenium) initialized and page context loaded.")
 
     def _setup_driver(self) -> webdriver.Chrome:
         chrome_options = Options()
@@ -33,26 +35,6 @@ class TenipoScraper:
             logging.critical(f"Failed to set up Selenium WebDriver: {e}")
             raise
 
-    def _decode_payload(self, payload: bytes) -> bytes:
-        if not payload: return b""
-        try:
-            decoded_b64_bytes = base64.b64decode(payload)
-            data_len = len(decoded_b64_bytes)
-            if data_len == 0: return b""
-            char_list = []
-            for i, byte_val in enumerate(decoded_b64_bytes):
-                shift = (i % data_len - i % 4) * data_len + 64
-                new_char_code = (byte_val - shift) % 256
-                char_list.append(chr(new_char_code))
-            second_base64_string = "".join(char_list)
-            missing_padding = len(second_base64_string) % 4
-            if missing_padding:
-                second_base64_string += '=' * (4 - missing_padding)
-            final_xml_bytes = base64.b64decode(second_base64_string.encode('latin-1'))
-            return final_xml_bytes
-        except Exception:
-            return b""
-
     def _xml_to_dict(self, element: ET.Element) -> dict:
         result = {}
         if element.attrib: result.update(element.attrib)
@@ -69,42 +51,34 @@ class TenipoScraper:
     def get_live_matches_summary(self) -> List[Dict[str, Any]]:
         try:
             del self.driver.requests
-            self.driver.get(str(self.settings.LIVESCORE_PAGE_URL))
 
             logging.info("Waiting for 'change2.xml' data request...")
-            self.driver.wait_for_request(r'/change2\.xml', timeout=25)
-            logging.info("'change2.xml' request captured.")
+            request = self.driver.wait_for_request(r'/change2\.xml', timeout=25)
+            logging.info(f"'change2.xml' request captured (size: {len(request.response.body)} bytes).")
 
-            candidate_requests = [
-                r for r in self.driver.requests
-                if r.response and '/change2.xml' in r.path
-            ]
+            # THE FIX: We use the browser's own JavaScript decoder function.
+            # The function `janko()` is loaded when we visit the livescore page.
+            # We pass the raw response body, base64 encoded, to the script.
 
-            if not candidate_requests:
-                logging.warning("No 'change2.xml' requests found in capture list.")
+            # Step 1: Base64 encode the raw bytes so we can pass it as a clean string to JavaScript
+            payload_b64 = base64.b64encode(request.response.body).decode('ascii')
+
+            # Step 2: Execute the site's own decoder function on the payload
+            logging.info("Executing site's native JavaScript decoder...")
+            decoded_xml_string = self.driver.execute_script("return janko(arguments[0]);", payload_b64)
+
+            if not decoded_xml_string:
+                logging.warning("JavaScript decoder returned an empty result.")
                 return []
 
-            best_request = sorted(candidate_requests, key=lambda r: len(r.response.body), reverse=True)[0]
-            logging.info(
-                f"Processing best candidate '{best_request.path}' (size: {len(best_request.response.body)} bytes).")
+            logging.info(f"Successfully decoded payload using JS. (First 100 bytes: {decoded_xml_string[:100]})")
 
-            # --- HARDCORE DEBUG LOGGING ---
-            logging.info(f"RAW PAYLOAD (first 100 bytes): {best_request.response.body[:100]}")
-
-            decompressed_xml_bytes = self._decode_payload(best_request.response.body)
-
-            if not decompressed_xml_bytes:
-                logging.warning(f"Payload from '{best_request.path}' was empty after decoding.")
-                return []
-
-            logging.info(f"DECODED PAYLOAD (first 100 bytes): {decompressed_xml_bytes[:100]}")
-            # --- END DEBUG LOGGING ---
-
+            # Step 3: Parse the now-clean XML
             parser = ET.XMLParser(recover=True)
-            root = ET.fromstring(decompressed_xml_bytes, parser=parser)
+            root = ET.fromstring(decoded_xml_string.encode('utf-8'), parser=parser)
+
             if root is None:
-                logging.warning(
-                    "Could not parse XML from decoded payload. The payload might be junk or in an unexpected format.")
+                logging.error("XML parsing failed even after successful JS decoding. The structure might have changed.")
                 return []
 
             match_tags = root.findall("./match")
@@ -126,15 +100,17 @@ class TenipoScraper:
         match_xml_full_url = self.settings.MATCH_XML_URL_TEMPLATE.format(match_id=match_id)
         try:
             del self.driver.requests
-            self.driver.get(str(self.settings.LIVESCORE_PAGE_URL))
             request = self.driver.wait_for_request(match_xml_full_url, timeout=20)
             if not (request and request.response): return {}
 
-            decompressed_xml_bytes = self._decode_payload(request.response.body)
-            if not decompressed_xml_bytes: return {}
+            payload_b64 = base64.b64encode(request.response.body).decode('ascii')
+            decoded_xml_string = self.driver.execute_script("return janko(arguments[0]);", payload_b64)
+
+            if not decoded_xml_string: return {}
 
             parser = ET.XMLParser(recover=True)
-            root = ET.fromstring(decompressed_xml_bytes, parser=parser)
+            root = ET.fromstring(decoded_xml_string.encode('utf-8'), parser=parser)
+
             if root is None: return {}
 
             return self._xml_to_dict(root)
