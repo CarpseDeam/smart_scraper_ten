@@ -14,24 +14,17 @@ class TenipoScraper:
         self.settings = settings
         self.playwright: Optional[Playwright] = None
         self.browser: Optional[Browser] = None
-        self.page: Optional[Page] = None
         logging.info("TenipoScraper instance created. Call start() to launch the browser.")
 
     async def start(self):
-        """Launches the browser and prepares the scraper for use."""
+        """Launches the browser."""
         logging.info("Starting Playwright...")
         self.playwright = await async_playwright().start()
         self.browser = await self.playwright.chromium.launch(
             headless=True,
             args=["--no-sandbox", "--disable-dev-shm-usage"]
         )
-        self.page = await self.browser.new_page(
-            user_agent=self.settings.USER_AGENT
-        )
-        logging.info("Playwright browser and page initialized successfully.")
-        # Navigate to the page once to get the decoding script in context.
-        await self.page.goto(str(self.settings.LIVESCORE_PAGE_URL), timeout=60000)
-        logging.info("Navigated to livescore page to load scripts.")
+        logging.info("Playwright browser initialized successfully.")
 
     async def close(self):
         """Closes the browser and stops Playwright."""
@@ -41,14 +34,23 @@ class TenipoScraper:
             await self.playwright.stop()
         logging.info("Playwright browser and context closed.")
 
-    async def _decode_payload(self, payload: bytes) -> bytes:
+    async def _get_page_with_decoder(self) -> Page:
+        """Gets a fresh page and navigates to it, ensuring the decoder function is loaded."""
+        if not self.browser:
+            raise ConnectionError("Browser is not available.")
+        page = await self.browser.new_page(user_agent=self.settings.USER_AGENT)
+        await page.goto(str(self.settings.LIVESCORE_PAGE_URL), timeout=60000, wait_until="domcontentloaded")
+        # Wait for the specific janko function to be defined on the page.
+        await page.wait_for_function("() => typeof janko === 'function'", timeout=15000)
+        logging.info("Page loaded and 'janko' decoder function is ready.")
+        return page
+
+    async def _decode_payload(self, page: Page, payload: bytes) -> bytes:
         """Delegates decoding to the browser's native JavaScript engine."""
-        if not self.page:
-            raise ConnectionError("Scraper not started or page is not available.")
         try:
             base64_string = payload.decode('ascii')
-            js_script = "() => janko(arguments[0])"
-            decoded_xml_string = await self.page.evaluate(js_script, base64_string)
+            # Pass the function as an argument to evaluate to avoid scope issues
+            decoded_xml_string = await page.evaluate("janko => janko(arguments[0])", base64_string)
             if not decoded_xml_string or not decoded_xml_string.strip().startswith('<'):
                 logging.error(f"JavaScript decoding failed. Result: {decoded_xml_string[:200]}")
                 return b""
@@ -59,22 +61,23 @@ class TenipoScraper:
 
     async def get_live_matches_summary(self) -> list[dict]:
         """Fetches the summary data for all live matches."""
-        if not self.page: return []
+        page = None
         try:
+            page = await self._get_page_with_decoder()
             logging.info("Fetching live matches summary...")
-            # Use wait_for_response to intercept the network request
-            async with self.page.expect_response(
+
+            async with page.expect_response(
                     lambda response: self.settings.LIVE_FEED_DATA_URL in response.url,
                     timeout=30000
             ) as response_info:
-                # We may need to reload to trigger the request if the page is idle
-                await self.page.reload(wait_until="networkidle", timeout=30000)
+                # Reloading now is safe because the context is established
+                await page.reload(wait_until="networkidle", timeout=30000)
 
             response = await response_info.value
             encrypted_content_bytes = await response.body()
 
             logging.info(f"Intercepted live feed: {response.url}. Now decoding.")
-            decompressed_xml_bytes = await self._decode_payload(encrypted_content_bytes)
+            decompressed_xml_bytes = await self._decode_payload(page, encrypted_content_bytes)
 
             if not decompressed_xml_bytes:
                 raise ValueError("Payload decoding returned empty result.")
@@ -86,23 +89,29 @@ class TenipoScraper:
         except Exception as e:
             logging.error(f"An error occurred in get_live_matches_summary: {e}", exc_info=True)
             return []
+        finally:
+            if page: await page.close()
 
     async def fetch_match_data(self, match_id: str) -> dict:
         """Fetches detailed data for a single match."""
-        if not self.page: return {}
+        page = None
         match_xml_full_url = self.settings.MATCH_XML_URL_TEMPLATE.format(match_id=match_id)
         try:
+            page = await self._get_page_with_decoder()
             logging.info(f"Fetching data for match: {match_xml_full_url}")
-            # We can just directly fetch this with Playwright's API request context
-            api_request_context = self.page.context.request
-            response = await api_request_context.get(match_xml_full_url)
+
+            async with page.expect_response(match_xml_full_url, timeout=30000) as response_info:
+                # Trigger the fetch from within the page's JS context
+                await page.evaluate(f"url => fetch(url)", match_xml_full_url)
+
+            response = await response_info.value
             encrypted_body_bytes = await response.body()
 
             if not encrypted_body_bytes:
                 logging.warning(f"Response body for match {match_id} was empty.")
                 return {}
 
-            decompressed_xml_bytes = await self._decode_payload(encrypted_body_bytes)
+            decompressed_xml_bytes = await self._decode_payload(page, encrypted_body_bytes)
             if not decompressed_xml_bytes:
                 raise ValueError(f"Payload decoding returned empty result for match {match_id}")
 
@@ -112,9 +121,10 @@ class TenipoScraper:
         except Exception as e:
             logging.error(f"An error occurred in fetch_match_data for ID {match_id}: {e}", exc_info=True)
             return {}
+        finally:
+            if page: await page.close()
 
     def _xml_to_dict(self, element: ET.Element) -> dict:
-        # This helper function does not need to change
         result = {}
         if element.attrib: result.update(element.attrib)
         if element.text and element.text.strip(): result['#text'] = element.text.strip()
