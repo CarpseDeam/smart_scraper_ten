@@ -1,5 +1,6 @@
 import logging
 import base64
+import zlib  # Import the zlib library for decompression
 import xml.etree.ElementTree as ET
 import httpx
 from typing import Optional
@@ -24,11 +25,19 @@ class TenipoClient:
         logging.info("TenipoClient closed.")
 
     def _decode_payload(self, payload: bytes) -> bytes:
-        """Decodes the Base64 payload from the API. This replaces the 'janko' JS function."""
+        """
+        Decodes the Base64 payload and then decompresses it.
+        This is a two-step process: Base64 Decode -> Zlib Decompress.
+        """
         try:
-            return base64.b64decode(payload)
+            # Step 1: Decode from Base64
+            base64_decoded = base64.b64decode(payload)
+            # Step 2: Decompress the result using zlib
+            # The raw binary data is compressed. This was the missing step.
+            return zlib.decompress(base64_decoded)
         except Exception as e:
-            logging.error(f"Base64 decoding failed: {e}", exc_info=True)
+            # This will catch errors from both b64decode and zlib.decompress
+            logging.error(f"Payload decoding/decompression failed: {e}", exc_info=True)
             return b""
 
     def _xml_to_dict(self, element: ET.Element) -> dict:
