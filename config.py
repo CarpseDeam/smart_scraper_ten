@@ -11,10 +11,12 @@ class Settings(BaseSettings):
         description="The main page to navigate to, which triggers the data requests."
     )
 
-    # THIS IS THE CORRECTED URL for the data file itself!
+    # NOTE: This setting is no longer directly used by get_live_matches_summary,
+    # as the scraper now specifically waits for 'change2.xml'.
+    # It is updated here for clarity and to reflect the current data source.
     LIVE_FEED_DATA_URL: str = Field(
-        default="https://tenipo.com/xmlko/live2.xml",
-        description="The full URL to the XML data feed that lists all live matches."
+        default="https://tenipo.com/xmlko/change2.xml",
+        description="The URL for the XML data feed that lists live matches."
     )
 
     MATCH_XML_URL_TEMPLATE: str = Field(
