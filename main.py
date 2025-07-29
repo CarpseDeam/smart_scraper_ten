@@ -9,65 +9,50 @@ import config
 from smart_scraper import TenipoScraper
 from data_mapper import transform_match_data_to_client_format
 
-# --- Global State Management ---
 app_container = {}
 app_settings = config.Settings()
 live_data_cache = {"data": {}, "last_updated": None}
 CACHE_REFRESH_INTERVAL_SECONDS = 30
 
 
-# --- Core Application Logic ---
-
 async def poll_for_live_data():
-    """
-    The main engine of our application. It runs in the background for the
-    entire lifespan of the app, continuously updating our data cache.
-    """
-    # Initialize our custom HTTP client for Tenipo.
-    client = TenipoScraper(app_settings)
-    app_container["client_instance"] = client
+    loop = asyncio.get_event_loop()
 
-    # This loop runs forever until the application is shut down.
+    try:
+        scraper = await loop.run_in_executor(None, lambda: TenipoScraper(app_settings))
+        app_container["scraper_instance"] = scraper
+    except Exception as e:
+        logging.critical(f"FATAL: Scraper initialization failed. Polling cannot start. Error: {e}")
+        return
+
     while True:
-        logging.info("BACKGROUND_POLL: Starting new polling cycle...")
+        logging.info("BACKGROUND_POLL: Starting polling cycle...")
         try:
-            # 1. Await the async scraper method directly.
-            all_matches_summary = await client.get_live_matches_summary()
-
-            # 2. Filter for ITF matches.
-            itf_matches_summary = [
-                m for m in all_matches_summary
-                if m and "ITF" in m.get("tournament_name", "")
-            ]
+            all_matches_summary = await loop.run_in_executor(None, scraper.get_live_matches_summary)
+            itf_matches_summary = [m for m in all_matches_summary if m and "ITF" in m.get("tournament_name", "")]
             logging.info(f"Found {len(itf_matches_summary)} live ITF matches to process.")
 
-            # 3. Build a new, fresh cache.
             new_cache_data = {}
             for match_summary in itf_matches_summary:
                 match_id = match_summary.get("id")
                 if not match_id: continue
 
-                # Await the async scraper method directly.
-                raw_data = await client.fetch_match_data(match_id)
+                raw_data = await loop.run_in_executor(None, lambda: scraper.fetch_match_data(match_id))
                 if raw_data:
                     formatted_data = transform_match_data_to_client_format(raw_data)
                     new_cache_data[match_id] = formatted_data
 
-            # 4. Atomically replace the old cache with the new one.
             live_data_cache["data"] = new_cache_data
             live_data_cache["last_updated"] = datetime.now(timezone.utc)
-            logging.info(f"BACKGROUND_POLL: Cache updated successfully with {len(new_cache_data)} matches.")
-
+            logging.info(f"BACKGROUND_POLL: Cache updated with {len(new_cache_data)} matches.")
         except Exception as e:
-            logging.error(f"BACKGROUND_POLL: An unexpected error occurred during polling cycle: {e}", exc_info=True)
+            logging.error(f"BACKGROUND_POLL: Error during polling cycle: {e}")
 
-        logging.info(f"BACKGROUND_POLL: Polling cycle complete. Waiting for {CACHE_REFRESH_INTERVAL_SECONDS} seconds.")
         await asyncio.sleep(CACHE_REFRESH_INTERVAL_SECONDS)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Handles application startup and shutdown events."""
     logging.info("Application startup: Initializing resources...")
     polling_task = asyncio.create_task(poll_for_live_data())
     app_container["polling_task"] = polling_task
@@ -75,16 +60,13 @@ async def lifespan(app: FastAPI):
     logging.info("Application shutdown: Cleaning up resources...")
     if polling_task:
         polling_task.cancel()
-    if client := app_container.get("client_instance"):
-        await client.close()
+    if scraper := app_container.get("scraper_instance"):
+        await asyncio.get_event_loop().run_in_executor(None, scraper.close)
     logging.info("Shutdown cleanup complete.")
 
 
-# Initialize the FastAPI application.
 app = FastAPI(title="Live Tennis Score API", lifespan=lifespan)
 
-
-# --- API Endpoints ---
 
 @app.get("/all_live_itf_data", status_code=status.HTTP_200_OK)
 async def get_all_live_itf_data():
