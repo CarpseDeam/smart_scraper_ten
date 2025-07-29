@@ -14,9 +14,6 @@ setuptools
 # For creating the API to serve our data
 fastapi
 
-# The server that runs our FastAPI application
-uvicorn
-pytest
-httpx
+playwright
 
 gunicorn

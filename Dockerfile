@@ -10,27 +10,16 @@ ENV PYTHONUNBUFFERED 1
 # Set the working directory in the container
 WORKDIR /app
 
-# Install system dependencies required for Google Chrome
-RUN apt-get update && apt-get install -y \
-    wget \
-    gnupg \
-    --no-install-recommends && \
-    rm -rf /var/lib/apt/lists/*
-
-# Install Google Chrome. This is needed for Selenium to work.
-# We are using the official Google repository for stability.
-RUN wget --quiet --output-document=- https://dl-ssl.google.com/linux/linux_signing_key.pub | gpg --dearmor > /etc/apt/trusted.gpg.d/google-archive.gpg && \
-    sh -c 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google.list' && \
-    apt-get update && \
-    apt-get install -y google-chrome-stable --no-install-recommends && \
-    rm -rf /var/lib/apt/lists/*
-
 # Copy the requirements file into the container first
 COPY requirements.txt .
 
 # Install Python dependencies from requirements.txt
 RUN pip install --no-cache-dir --upgrade pip
 RUN pip install --no-cache-dir -r requirements.txt
+
+# Let Playwright install its own, stable browser binaries and dependencies.
+# This is far more reliable than installing Chrome manually.
+RUN playwright install --with-deps chrome
 
 # Copy the rest of your application code into the container
 COPY . .
@@ -39,5 +28,4 @@ COPY . .
 EXPOSE 8000
 
 # Final, most robust command form.
-# We explicitly invoke a shell to ensure the ${PORT} variable is substituted.
 CMD ["/bin/sh", "-c", "gunicorn -k uvicorn.workers.UvicornWorker -w 2 main:app --bind 0.0.0.0:${PORT:-8000}"]
