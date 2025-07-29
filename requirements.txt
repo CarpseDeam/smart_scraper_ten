@@ -4,3 +4,4 @@ gunicorn
 pydantic-settings
 selenium
 selenium-wire
+httpx
