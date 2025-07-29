@@ -26,17 +26,15 @@ class TenipoClient:
 
     def _decode_payload(self, payload: bytes) -> bytes:
         """
-        Decodes the Base64 payload and then decompresses it.
-        This is a two-step process: Base64 Decode -> Zlib Decompress.
+        Decodes the Base64 payload and then decompresses it using the raw DEFLATE algorithm.
         """
         try:
             # Step 1: Decode from Base64
             base64_decoded = base64.b64decode(payload)
-            # Step 2: Decompress the result using zlib
-            # The raw binary data is compressed. This was the missing step.
-            return zlib.decompress(base64_decoded)
+            # Step 2: Decompress using zlib with a negative wbits value for raw deflate.
+            # This is the definitive fix for the "incorrect header check" error.
+            return zlib.decompress(base64_decoded, -zlib.MAX_WBITS)
         except Exception as e:
-            # This will catch errors from both b64decode and zlib.decompress
             logging.error(f"Payload decoding/decompression failed: {e}", exc_info=True)
             return b""
 
@@ -104,5 +102,5 @@ class TenipoClient:
                 exc_info=True)
             return {}
         except Exception as e:
-            logging.error(f"An error occurred in fetch_match_data for ID {match_id}: {e}", exc_info=True)
+            logging.error(f"An unexpected error occurred in fetch_match_data for ID {match_id}: {e}", exc_info=True)
             return {}
