@@ -71,37 +71,40 @@ class TenipoScraper:
             del self.driver.requests
             self.driver.get(str(self.settings.LIVESCORE_PAGE_URL))
 
-            # Step 1: Patiently wait for the key data file.
-            # This is the most important event. If it doesn't happen, there's likely no live data to get.
             logging.info("Waiting for 'change2.xml' data request...")
             self.driver.wait_for_request(r'/change2\.xml', timeout=25)
             logging.info("'change2.xml' request captured.")
 
-            # Step 2: Find all 'change2.xml' requests that we've captured.
             candidate_requests = [
                 r for r in self.driver.requests
                 if r.response and '/change2.xml' in r.path
             ]
 
             if not candidate_requests:
-                logging.warning(
-                    "wait_for_request succeeded, but no 'change2.xml' requests found in capture list. This is unusual.")
+                logging.warning("No 'change2.xml' requests found in capture list.")
                 return []
 
-            # Step 3: Pick the best one (largest payload) and process it.
             best_request = sorted(candidate_requests, key=lambda r: len(r.response.body), reverse=True)[0]
             logging.info(
                 f"Processing best candidate '{best_request.path}' (size: {len(best_request.response.body)} bytes).")
 
+            # --- HARDCORE DEBUG LOGGING ---
+            logging.info(f"RAW PAYLOAD (first 100 bytes): {best_request.response.body[:100]}")
+
             decompressed_xml_bytes = self._decode_payload(best_request.response.body)
+
             if not decompressed_xml_bytes:
                 logging.warning(f"Payload from '{best_request.path}' was empty after decoding.")
                 return []
 
+            logging.info(f"DECODED PAYLOAD (first 100 bytes): {decompressed_xml_bytes[:100]}")
+            # --- END DEBUG LOGGING ---
+
             parser = ET.XMLParser(recover=True)
             root = ET.fromstring(decompressed_xml_bytes, parser=parser)
             if root is None:
-                logging.warning("Could not parse XML from decoded payload.")
+                logging.warning(
+                    "Could not parse XML from decoded payload. The payload might be junk or in an unexpected format.")
                 return []
 
             match_tags = root.findall("./match")
@@ -112,8 +115,8 @@ class TenipoScraper:
             return [self._xml_to_dict(tag) for tag in match_tags]
 
         except TimeoutException:
-            logging.warning("TIMEOUT: No 'change2.xml' request was detected in the last 25 seconds.")
-            logging.warning("This is normal if there are no live ITF matches currently running.")
+            logging.warning(
+                "TIMEOUT: No 'change2.xml' request was detected. This is normal if no ITF matches are live.")
             return []
         except Exception as e:
             logging.error(f"An unexpected error occurred in get_live_matches_summary: {e}", exc_info=True)
@@ -123,7 +126,6 @@ class TenipoScraper:
         match_xml_full_url = self.settings.MATCH_XML_URL_TEMPLATE.format(match_id=match_id)
         try:
             del self.driver.requests
-            # We still visit the main page to ensure scripts are loaded for subsequent requests.
             self.driver.get(str(self.settings.LIVESCORE_PAGE_URL))
             request = self.driver.wait_for_request(match_xml_full_url, timeout=20)
             if not (request and request.response): return {}
