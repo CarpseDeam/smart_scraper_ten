@@ -25,12 +25,17 @@ class TenipoScraper:
         chrome_options.add_argument("--headless")
         chrome_options.add_argument("--no-sandbox")
         chrome_options.add_argument("--disable-dev-shm-usage")
-        # --- FIXES ---
-        # This is a general stability improvement for headless environments
+
+        # --- MORE ROBUST FIXES ---
+        # These are known to fix stubborn startup issues in Docker/container environments.
         chrome_options.add_argument("--disable-gpu")
-        # This is the specific fix for the 'user data directory' error
+        chrome_options.add_argument("--window-size=1920,1080")
         chrome_options.add_argument("--user-data-dir=/tmp/chrome-user-data")
+
+        # This one is often the key to solving complex sandboxing/permission issues.
+        chrome_options.add_argument("--single-process")
         # --- END FIXES ---
+
         chrome_options.add_argument(f"user-agent={self.settings.USER_AGENT}")
         seleniumwire_options = {'disable_encoding': True}
         try:
