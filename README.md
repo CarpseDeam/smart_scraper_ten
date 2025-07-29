@@ -116,3 +116,28 @@ To run the automated tests, use pytest:
 ```bash
   pytest
 ```
+🚀 Deployment to Railway
+This application is ready to be deployed to Railway!
+Commit and Push: Commit the new Dockerfile, .dockerignore, and updated requirements.txt and README.md to your GitHub repository.
+Create a Railway Project:
+Log in to your Railway account.
+Click "New Project" and select "Deploy from GitHub repo".
+Choose your repository.
+Deployment: Railway will automatically detect the Dockerfile and start building and deploying your application. No Procfile is needed!
+Add Environment Variables:
+In your Railway project dashboard, go to the "Variables" tab.
+Add your configuration variables (e.g., LIVESCORE_PAGE_URL) if they differ from the defaults. Railway will provide the PORT variable automatically.
+Done! Railway will provide you with a public URL where your API is live.
+⚙️ Configuration
+The application's behavior is controlled by environment variables, which are managed by config.py. You can override the default values by creating a .env file in the project root or by setting them in your deployment environment (like Railway).
+LIVESCORE_PAGE_URL: The page the scraper visits to initialize itself and its decoding scripts.
+LIVE_FEED_DATA_URL: The URL for the main XML data feed that lists all live matches.
+MATCH_XML_URL_TEMPLATE: The template for fetching a specific match's XML data.
+USER_AGENT: The User-Agent string the scraper uses.
+🚀 API Endpoints
+The following endpoints are available once the application is running. The data is served from a cache that is updated automatically in the background approximately every 30 seconds.
+Get All Live ITF Data
+Returns data for all currently live ITF matches found by the scraper.
+URL: /all_live_itf_data
+Method: GET
+Success Response (200 OK):
