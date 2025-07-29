@@ -6,7 +6,7 @@ from typing import List, Dict, Any
 import config
 from seleniumwire import webdriver
 from selenium.webdriver.chrome.options import Options
-from selenium.common.exceptions import WebDriverException
+from selenium.common.exceptions import WebDriverException, TimeoutException
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -68,11 +68,26 @@ class TenipoScraper:
 
     def get_live_matches_summary(self) -> List[Dict[str, Any]]:
         try:
+            del self.driver.requests
             self.driver.get(str(self.settings.LIVESCORE_PAGE_URL))
-            request = self.driver.wait_for_request(self.settings.LIVE_FEED_DATA_URL, timeout=20)
-            if not (request and request.response): return []
+            # Wait for EITHER live2.xml or change2.xml to be requested.
+            self.driver.wait_for_request(r'/(live2|change2)\.xml', timeout=20)
 
-            decompressed_xml_bytes = self._decode_payload(request.response.body)
+            # Find all potential data requests and identify the best one (largest).
+            candidate_requests = [
+                r for r in self.driver.requests
+                if r.response and ('/live2.xml' in r.path or '/change2.xml' in r.path)
+            ]
+
+            if not candidate_requests:
+                logging.warning("No live2.xml or change2.xml data requests were found.")
+                return []
+
+            # Assume the largest request is the main data payload.
+            best_request = sorted(candidate_requests, key=lambda r: len(r.response.body), reverse=True)[0]
+            logging.info(f"Identified '{best_request.path}' as best candidate (size: {len(best_request.response.body)} bytes).")
+
+            decompressed_xml_bytes = self._decode_payload(best_request.response.body)
             if not decompressed_xml_bytes: return []
 
             parser = ET.XMLParser(recover=True)
@@ -83,14 +98,18 @@ class TenipoScraper:
             if not match_tags:
                 match_tags = root.findall("./event")
             return [self._xml_to_dict(tag) for tag in match_tags]
+        except TimeoutException:
+            logging.warning("Timed out waiting for a data request (live2.xml or change2.xml).")
+            return []
         except Exception as e:
-            logging.error(f"Error in get_live_matches_summary: {e}")
+            logging.error(f"Error in get_live_matches_summary: {e}", exc_info=True)
             return []
 
     def fetch_match_data(self, match_id: str) -> Dict[str, Any]:
         match_xml_full_url = self.settings.MATCH_XML_URL_TEMPLATE.format(match_id=match_id)
         try:
             del self.driver.requests
+            # We still visit the main page to ensure scripts are loaded for subsequent requests.
             self.driver.get(str(self.settings.LIVESCORE_PAGE_URL))
             request = self.driver.wait_for_request(match_xml_full_url, timeout=20)
             if not (request and request.response): return {}
