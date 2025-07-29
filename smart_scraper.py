@@ -8,8 +8,8 @@ import config
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-
-class TenipoClient:
+# The class name is now CORRECTLY TenipoScraper to match what main.py imports.
+class TenipoScraper:
     def __init__(self, settings: config.Settings):
         self.settings = settings
         self.DEFAULT_HEADERS = {
@@ -20,11 +20,11 @@ class TenipoClient:
             "Referer": str(self.settings.LIVESCORE_PAGE_URL)
         }
         self.client = httpx.AsyncClient(headers=self.DEFAULT_HEADERS, timeout=30.0)
-        logging.info("TenipoClient initialized with httpx and stealth headers.")
+        logging.info("TenipoScraper (HTTPX) initialized with stealth headers.")
 
     async def close(self):
         await self.client.aclose()
-        logging.info("TenipoClient httpx session closed.")
+        logging.info("TenipoScraper httpx session closed.")
 
     def _decode_payload(self, payload: bytes) -> bytes:
         if not payload: return b""
@@ -67,27 +67,14 @@ class TenipoClient:
             if not decompressed_xml_bytes:
                 logging.info("Payload was empty or junk after decoding. Skipping.")
                 return []
-
-            # ===================================================================
-            # ===> DIAGNOSTIC LOGGING: Let's see the truth <===
-            logging.info(
-                f"DECRYPTED SUMMARY XML (first 500 chars): {decompressed_xml_bytes.decode('utf-8', errors='ignore')[:500]}")
-            # ===================================================================
-
             parser = ET.XMLParser(recover=True)
             root = ET.fromstring(decompressed_xml_bytes, parser=parser)
             if root is None:
                 logging.warning("XML was unrecoverably broken after decoding. Skipping payload.")
                 return []
-
-            # ===================================================================
-            # ===> THE FIX: Check for 'match' first, then fall back to 'event' <===
             match_tags = root.findall("./match")
             if not match_tags:
-                logging.info("No '<match>' tags found, falling back to searching for '<event>' tags.")
                 match_tags = root.findall("./event")
-            # ===================================================================
-
             return [self._xml_to_dict(tag) for tag in match_tags]
         except Exception as e:
             logging.error(f"Error in get_live_matches_summary: {e}")
@@ -107,8 +94,6 @@ class TenipoClient:
             if root is None:
                 logging.warning(f"XML for match {match_id} was unrecoverably broken. Skipping.")
                 return {}
-
-            # The detailed match data seems to always have a root <match> tag, so no fallback is needed here yet.
             return self._xml_to_dict(root)
         except Exception as e:
             logging.error(f"Error in fetch_match_data for ID {match_id}: {e}")
