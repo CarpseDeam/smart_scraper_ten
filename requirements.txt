@@ -15,5 +15,5 @@ setuptools
 fastapi
 
 playwright
-
+uvicorn
 gunicorn
