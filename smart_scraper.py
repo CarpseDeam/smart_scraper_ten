@@ -1,6 +1,6 @@
 import logging
 import base64
-import zlib  # Import the zlib library for decompression
+import gzip  # The correct library for this compression format
 import xml.etree.ElementTree as ET
 import httpx
 from typing import Optional
@@ -26,14 +26,13 @@ class TenipoClient:
 
     def _decode_payload(self, payload: bytes) -> bytes:
         """
-        Decodes the Base64 payload and then decompresses it using the raw DEFLATE algorithm.
+        Decodes the Base64 payload and then decompresses it using gzip.
         """
         try:
             # Step 1: Decode from Base64
             base64_decoded = base64.b64decode(payload)
-            # Step 2: Decompress using zlib with a negative wbits value for raw deflate.
-            # This is the definitive fix for the "incorrect header check" error.
-            return zlib.decompress(base64_decoded, -zlib.MAX_WBITS)
+            # Step 2: Decompress the result using the gzip library.
+            return gzip.decompress(base64_decoded)
         except Exception as e:
             logging.error(f"Payload decoding/decompression failed: {e}", exc_info=True)
             return b""
