@@ -2,5 +2,5 @@ fastapi
 uvicorn
 gunicorn
 pydantic-settings
-playwright
-httpx
+selenium
+selenium-wire

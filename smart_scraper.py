@@ -1,63 +1,67 @@
 import logging
 import base64
-import zlib
-import gzip
+import time
 import xml.etree.ElementTree as ET
-import httpx
-from typing import Optional
 
 import config
+from seleniumwire import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from selenium.common.exceptions import WebDriverException
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 
-class TenipoClient:
-    """Manages fetching and decoding data from the Tenipo API endpoints directly via HTTP."""
+class TenipoScraper:
+    """Manages the browser instance and orchestrates the scraping process using Selenium-Wire."""
 
     def __init__(self, settings: config.Settings):
         self.settings = settings
-        self.client = httpx.AsyncClient(
-            headers={"User-Agent": self.settings.USER_AGENT},
-            timeout=30.0
-        )
-        logging.info("TenipoClient initialized with HTTPX.")
+        self.driver: webdriver.Chrome = self._setup_driver()
+        logging.info("TenipoScraper initialized and SeleniumWire WebDriver set up.")
+        # Load the page once to get the decoder script into the browser's context.
+        self.driver.get(str(self.settings.LIVESCORE_PAGE_URL))
+        logging.info("Initial page loaded to ensure decoder script is available.")
 
-    async def close(self):
-        """Closes the HTTP client."""
-        await self.client.aclose()
-        logging.info("TenipoClient closed.")
+    def _setup_driver(self) -> webdriver.Chrome:
+        chrome_options = Options()
+        # All the arguments needed for stable container operation
+        chrome_options.add_argument("--headless")
+        chrome_options.add_argument("--no-sandbox")
+        chrome_options.add_argument("--disable-dev-shm-usage")
+        chrome_options.add_argument("--disable-gpu")
+        chrome_options.add_argument("--single-process")
+        chrome_options.add_argument("--user-data-dir=/tmp/chrome-user-data")
+        chrome_options.add_argument(f"user-agent={self.settings.USER_AGENT}")
+
+        seleniumwire_options = {'disable_encoding': True}
+
+        try:
+            service = Service()
+            driver = webdriver.Chrome(service=service, options=chrome_options,
+                                      seleniumwire_options=seleniumwire_options)
+            time.sleep(2)  # Brief pause to prevent startup race conditions
+            driver.set_page_load_timeout(45)
+            logging.info("SeleniumWire WebDriver initialized successfully.")
+            return driver
+        except WebDriverException as e:
+            logging.critical(f"Failed to set up Selenium WebDriver: {e}")
+            raise
 
     def _decode_payload(self, payload: bytes) -> bytes:
-        """
-        Decodes the Base64 payload and then attempts every standard decompression method.
-        This is a diagnostic approach to find the correct format.
-        """
+        """Delegates decoding to the browser's native JavaScript 'janko' function."""
         try:
-            base64_decoded = base64.b64decode(payload)
+            base64_string = payload.decode('ascii')
+            # This relies on the janko() function being available on the loaded page.
+            js_script = "return janko(arguments[0]);"
+            decoded_xml_string = self.driver.execute_script(js_script, base64_string)
+            if not decoded_xml_string or not decoded_xml_string.strip().startswith('<'):
+                logging.error(f"JavaScript decoding failed. Result: {decoded_xml_string[:200]}")
+                return b""
+            return decoded_xml_string.encode('utf-8')
         except Exception as e:
-            logging.error(f"CRITICAL: Base64 decoding step failed: {e}")
+            logging.error(f"DECODING FAILED during JavaScript execution: {e}", exc_info=True)
             return b""
-
-        # Attempt 1: Raw Deflate (for 'incorrect header check' errors)
-        try:
-            return zlib.decompress(base64_decoded, -zlib.MAX_WBITS)
-        except Exception:
-            pass  # Suppress error and try next method
-
-        # Attempt 2: Standard zlib
-        try:
-            return zlib.decompress(base64_decoded)
-        except Exception:
-            pass  # Suppress error and try next method
-
-        # Attempt 3: Gzip
-        try:
-            return gzip.decompress(base64_decoded)
-        except Exception:
-            pass  # Suppress error and try next method
-
-        # If all methods fail, log the diagnostic info.
-        logging.error("CRITICAL: All decompression methods failed. The data format is unknown.")
-        logging.error(f"DIAGNOSTIC: Raw bytes (first 50) after Base64 decode: {base64_decoded[:50].hex()}")
-        return b""
 
     def _xml_to_dict(self, element: ET.Element) -> dict:
         result = {}
@@ -72,16 +76,17 @@ class TenipoClient:
                 result[child.tag] = child_data
         return result
 
-    async def get_live_matches_summary(self) -> list[dict]:
-        """Fetches the summary data for all live matches directly via HTTP."""
+    def get_live_matches_summary(self) -> list[dict]:
+        """Fetches the summary data for all live matches from live2.xml."""
         try:
-            logging.info(f"Fetching live matches summary from {self.settings.LIVE_FEED_DATA_URL}")
-            response = await self.client.get(self.settings.LIVE_FEED_DATA_URL)
-            response.raise_for_status()
+            logging.info(f"Fetching live matches summary...")
+            request = self.driver.wait_for_request(self.settings.LIVE_FEED_DATA_URL, timeout=30)
+            if not (request and request.response):
+                logging.warning("Did not intercept a response for the live feed.")
+                return []
 
-            encrypted_content_bytes = response.content
+            encrypted_content_bytes = request.response.body
             decompressed_xml_bytes = self._decode_payload(encrypted_content_bytes)
-
             if not decompressed_xml_bytes:
                 raise ValueError("Payload decoding returned empty result.")
 
@@ -91,19 +96,24 @@ class TenipoClient:
             return live_matches
         except Exception as e:
             logging.error(f"An error occurred in get_live_matches_summary: {e}", exc_info=True)
+            # Reload page in case of error to reset state
+            self.driver.get(str(self.settings.LIVESCORE_PAGE_URL))
             return []
 
-    async def fetch_match_data(self, match_id: str) -> dict:
-        """Fetches detailed data for a single match directly via HTTP."""
+    def fetch_match_data(self, match_id: str) -> dict:
+        """Fetches and decodes detailed data for a single match ID."""
         match_xml_full_url = self.settings.MATCH_XML_URL_TEMPLATE.format(match_id=match_id)
         try:
-            logging.info(f"Fetching data for match from: {match_xml_full_url}")
-            response = await self.client.get(match_xml_full_url)
-            response.raise_for_status()
+            del self.driver.requests
+            self.driver.execute_script(f"fetch('{match_xml_full_url}');")
+            request = self.driver.wait_for_request(match_xml_full_url, timeout=30)
 
-            encrypted_body_bytes = response.content
+            if not (request and request.response):
+                logging.error(f"Did not get a response when fetching {match_xml_full_url}")
+                return {}
+
+            encrypted_body_bytes = request.response.body
             if not encrypted_body_bytes:
-                logging.warning(f"Response body for match {match_id} was empty.")
                 return {}
 
             decompressed_xml_bytes = self._decode_payload(encrypted_body_bytes)
@@ -111,8 +121,12 @@ class TenipoClient:
                 raise ValueError(f"Payload decoding returned empty result for match {match_id}")
 
             root = ET.fromstring(decompressed_xml_bytes)
-            logging.info(f"Successfully fetched and decoded data for match {match_id}")
             return self._xml_to_dict(root)
         except Exception as e:
-            logging.error(f"An unexpected error occurred in fetch_match_data for ID {match_id}: {e}", exc_info=True)
+            logging.error(f"An unexpected error in fetch_match_data for ID {match_id}: {e}", exc_info=True)
             return {}
+
+    def close(self) -> None:
+        if self.driver:
+            self.driver.quit()
+            logging.info("WebDriver closed.")
