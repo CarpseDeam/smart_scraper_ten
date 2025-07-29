@@ -25,6 +25,12 @@ class TenipoScraper:
         chrome_options.add_argument("--headless")
         chrome_options.add_argument("--no-sandbox")
         chrome_options.add_argument("--disable-dev-shm-usage")
+        # --- FIXES ---
+        # This is a general stability improvement for headless environments
+        chrome_options.add_argument("--disable-gpu")
+        # This is the specific fix for the 'user data directory' error
+        chrome_options.add_argument("--user-data-dir=/tmp/chrome-user-data")
+        # --- END FIXES ---
         chrome_options.add_argument(f"user-agent={self.settings.USER_AGENT}")
         seleniumwire_options = {'disable_encoding': True}
         try:
