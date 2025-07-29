@@ -2,7 +2,7 @@ import logging
 import base64
 import xml.etree.ElementTree as ET
 import httpx
-from typing import Optional, List, Dict, Any
+from typing import List, Dict, Any
 
 import config
 
@@ -45,19 +45,19 @@ class TenipoClient:
             char_list = []
             for i, byte_val in enumerate(decoded_b64_bytes):
                 shift = (i % data_len - i % 4) * data_len + 64
-
-                # ===================================================================
-                # ===> THE FINAL FIX: Emulate JavaScript's "wrap-around" math <===
                 new_char_code = (byte_val - shift) % 256
-                # ===================================================================
-
                 char_list.append(chr(new_char_code))
 
             second_base64_string = "".join(char_list)
-            final_xml_bytes = base64.b64decode(second_base64_string)
+
+            # ===================================================================
+            # ===> THE FINAL FIX: Encoding the string before the final decode <===
+            final_xml_bytes = base64.b64decode(second_base64_string.encode('latin-1'))
+            # ===================================================================
+
             return final_xml_bytes
         except Exception as e:
-            logging.error(f"Payload decoding failed: {e}", exc_info=True)
+            logging.error(f"Payload decoding failed: {e}", exc_info=False)  # Keep logs clean
             return b""
 
     def _xml_to_dict(self, element: ET.Element) -> dict:
@@ -77,41 +77,28 @@ class TenipoClient:
     async def get_live_matches_summary(self) -> List[Dict[str, Any]]:
         """Fetches the summary data for all live matches."""
         try:
-            logging.info(f"Fetching live matches summary from {self.settings.LIVE_FEED_DATA_URL}")
             response = await self.client.get(self.settings.LIVE_FEED_DATA_URL)
             response.raise_for_status()
-
-            encrypted_content_bytes = response.content
-            decompressed_xml_bytes = self._decode_payload(encrypted_content_bytes)
+            decompressed_xml_bytes = self._decode_payload(response.content)
             if not decompressed_xml_bytes:
                 raise ValueError("Payload decoding returned empty result.")
-
             root = ET.fromstring(decompressed_xml_bytes)
-            live_matches = [self._xml_to_dict(match_tag) for match_tag in root.findall("./match")]
-            logging.info(f"Found {len(live_matches)} total live matches in summary.")
-            return live_matches
+            return [self._xml_to_dict(tag) for tag in root.findall("./match")]
         except Exception as e:
-            logging.error(f"An error occurred in get_live_matches_summary: {e}")
+            logging.error(f"Error in get_live_matches_summary: {e}")
             return []
 
     async def fetch_match_data(self, match_id: str) -> Dict[str, Any]:
         """Fetches and decodes detailed data for a single match."""
         match_xml_full_url = self.settings.MATCH_XML_URL_TEMPLATE.format(match_id=match_id)
         try:
-            logging.info(f"Fetching data for match from: {match_xml_full_url}")
             response = await self.client.get(match_xml_full_url)
             response.raise_for_status()
-
-            encrypted_body_bytes = response.content
-            if not encrypted_body_bytes:
-                return {}
-
-            decompressed_xml_bytes = self._decode_payload(encrypted_body_bytes)
+            decompressed_xml_bytes = self._decode_payload(response.content)
             if not decompressed_xml_bytes:
                 raise ValueError(f"Payload decoding returned empty result for match {match_id}")
-
             root = ET.fromstring(decompressed_xml_bytes)
             return self._xml_to_dict(root)
         except Exception as e:
-            logging.error(f"An unexpected error occurred in fetch_match_data for ID {match_id}: {e}")
+            logging.error(f"Error in fetch_match_data for ID {match_id}: {e}")
             return {}
