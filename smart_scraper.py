@@ -2,62 +2,60 @@ import logging
 import base64
 import xml.etree.ElementTree as ET
 import httpx
-from typing import Optional
+from typing import Optional, List, Dict, Any
 
 import config
 
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 class TenipoClient:
-    """Manages fetching data and running it through the custom Janko decoder cipher."""
+    """
+    A high-performance, asynchronous HTTP client for fetching and decoding data from Tenipo.
+    This client mimics a real browser's headers to avoid being blocked.
+    """
 
     def __init__(self, settings: config.Settings):
         self.settings = settings
+        # These headers are crucial for mimicking a real browser request
+        self.DEFAULT_HEADERS = {
+            "User-Agent": self.settings.USER_AGENT,
+            "Accept": "application/xml, text/xml, */*; q=0.01",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": str(self.settings.LIVESCORE_PAGE_URL) # The server expects this!
+        }
         self.client = httpx.AsyncClient(
-            headers={"User-Agent": self.settings.USER_AGENT},
+            headers=self.DEFAULT_HEADERS,
             timeout=30.0
         )
-        logging.info("TenipoClient initialized with HTTPX.")
+        logging.info("TenipoClient initialized with httpx and stealth headers.")
 
     async def close(self):
-        """Closes the HTTP client."""
+        """Closes the HTTP client session gracefully."""
         await self.client.aclose()
-        logging.info("TenipoClient closed.")
+        logging.info("TenipoClient httpx session closed.")
 
     def _decode_payload(self, payload: bytes) -> bytes:
         """
-        Implements the custom multi-step decoding process reverse-engineered from the website's janko() function.
+        The reverse-engineered multi-step decoding function for Tenipo's data payloads.
         """
         try:
-            # First Pass Decode
-            first_pass_decoded_bytes = base64.b64decode(payload)
-
-            # The Custom Cipher Loop
-            data_len = len(first_pass_decoded_bytes)
+            decoded_b64_bytes = base64.b64decode(payload)
+            data_len = len(decoded_b64_bytes)
             char_list = []
-
-            for i, byte_val in enumerate(first_pass_decoded_bytes):
-                # Calculate the shift value using the exact mathematical formula.
+            for i, byte_val in enumerate(decoded_b64_bytes):
                 shift = (i % data_len - i % 4) * data_len + 64
-
-                # Calculate the new character's code.
                 new_char_code = byte_val - shift
-
-                # Convert this new_char_code back into a character and append.
                 char_list.append(chr(new_char_code))
-
-            # Join the Characters into the second Base64 string.
             second_base64_string = "".join(char_list)
-
-            # Second Pass Decode to get the final, clean data.
             final_xml_bytes = base64.b64decode(second_base64_string)
-
             return final_xml_bytes
         except Exception as e:
-            # If any part of the decoding fails, log the error and return empty bytes.
-            logging.error(f"Custom payload decoding failed: {e}", exc_info=True)
+            logging.error(f"Payload decoding failed: {e}", exc_info=True)
             return b""
 
     def _xml_to_dict(self, element: ET.Element) -> dict:
+        """Recursively converts an XML element into a dictionary."""
         result = {}
         if element.attrib: result.update(element.attrib)
         if element.text and element.text.strip(): result['#text'] = element.text.strip()
@@ -70,8 +68,8 @@ class TenipoClient:
                 result[child.tag] = child_data
         return result
 
-    async def get_live_matches_summary(self) -> list[dict]:
-        """Fetches the summary data for all live matches directly via HTTP."""
+    async def get_live_matches_summary(self) -> List[Dict[str, Any]]:
+        """Fetches the summary data for all live matches."""
         try:
             logging.info(f"Fetching live matches summary from {self.settings.LIVE_FEED_DATA_URL}")
             response = await self.client.get(self.settings.LIVE_FEED_DATA_URL)
@@ -79,20 +77,20 @@ class TenipoClient:
 
             encrypted_content_bytes = response.content
             decompressed_xml_bytes = self._decode_payload(encrypted_content_bytes)
-
             if not decompressed_xml_bytes:
                 raise ValueError("Payload decoding returned empty result.")
 
             root = ET.fromstring(decompressed_xml_bytes)
+            # The summary XML uses 'match' tags
             live_matches = [self._xml_to_dict(match_tag) for match_tag in root.findall("./match")]
             logging.info(f"Found {len(live_matches)} total live matches in summary.")
             return live_matches
         except Exception as e:
-            logging.error(f"An error occurred in get_live_matches_summary: {e}", exc_info=True)
+            logging.error(f"An error occurred in get_live_matches_summary: {e}")
             return []
 
-    async def fetch_match_data(self, match_id: str) -> dict:
-        """Fetches detailed data for a single match directly via HTTP."""
+    async def fetch_match_data(self, match_id: str) -> Dict[str, Any]:
+        """Fetches and decodes detailed data for a single match."""
         match_xml_full_url = self.settings.MATCH_XML_URL_TEMPLATE.format(match_id=match_id)
         try:
             logging.info(f"Fetching data for match from: {match_xml_full_url}")
@@ -108,7 +106,8 @@ class TenipoClient:
                 raise ValueError(f"Payload decoding returned empty result for match {match_id}")
 
             root = ET.fromstring(decompressed_xml_bytes)
+            # The detailed match data has a single root 'match' tag
             return self._xml_to_dict(root)
         except Exception as e:
-            logging.error(f"An unexpected error occurred in fetch_match_data for ID {match_id}: {e}", exc_info=True)
+            logging.error(f"An unexpected error occurred in fetch_match_data for ID {match_id}: {e}")
             return {}

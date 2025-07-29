@@ -1,7 +1,12 @@
+# requirements.txt
+
+# For the high-performance async API
 fastapi
 uvicorn
 gunicorn
+
+# For data validation and settings management
 pydantic-settings
-selenium
-selenium-wire
+
+# The high-performance async HTTP client for the scraper
 httpx
