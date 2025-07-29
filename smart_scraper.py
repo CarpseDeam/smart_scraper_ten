@@ -22,13 +22,21 @@ class TenipoScraper:
 
     def _setup_driver(self) -> webdriver.Chrome:
         chrome_options = Options()
+        # --- THE KITCHEN SINK OF STABILITY FIXES ---
         chrome_options.add_argument("--headless")
         chrome_options.add_argument("--no-sandbox")
         chrome_options.add_argument("--disable-dev-shm-usage")
         chrome_options.add_argument("--disable-gpu")
-        chrome_options.add_argument("--window-size=1920,1080")
-        chrome_options.add_argument("--user-data-dir=/tmp/chrome-user-data")
+        chrome_options.add_argument("--disable-extensions")
+        chrome_options.add_argument("--disable-in-process-stack-traces")
+        chrome_options.add_argument("--disable-logging")
+        chrome_options.add_argument("--log-level=3")
         chrome_options.add_argument("--single-process")
+        chrome_options.add_argument("--user-data-dir=/tmp/chrome-user-data")
+        chrome_options.add_argument("--remote-debugging-port=9222") # Added for stability
+        chrome_options.add_argument("--window-size=1920,1080")
+        # --- END FIXES ---
+
         chrome_options.add_argument(f"user-agent={self.settings.USER_AGENT}")
         seleniumwire_options = {'disable_encoding': True}
         try:
