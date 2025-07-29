@@ -25,17 +25,10 @@ class TenipoScraper:
         chrome_options.add_argument("--headless")
         chrome_options.add_argument("--no-sandbox")
         chrome_options.add_argument("--disable-dev-shm-usage")
-
-        # --- MORE ROBUST FIXES ---
-        # These are known to fix stubborn startup issues in Docker/container environments.
         chrome_options.add_argument("--disable-gpu")
         chrome_options.add_argument("--window-size=1920,1080")
         chrome_options.add_argument("--user-data-dir=/tmp/chrome-user-data")
-
-        # This one is often the key to solving complex sandboxing/permission issues.
         chrome_options.add_argument("--single-process")
-        # --- END FIXES ---
-
         chrome_options.add_argument(f"user-agent={self.settings.USER_AGENT}")
         seleniumwire_options = {'disable_encoding': True}
         try:
@@ -61,10 +54,6 @@ class TenipoScraper:
         return result
 
     def _decode_payload(self, payload: bytes) -> bytes:
-        """
-        Delegates decoding to the browser's native JavaScript engine,
-        calling the website's own `janko()` function to avoid translation errors.
-        """
         try:
             base64_string = payload.decode('ascii')
             js_script = "return janko(arguments[0]);"
@@ -80,10 +69,6 @@ class TenipoScraper:
             return b""
 
     def get_live_matches_summary(self) -> list[dict]:
-        """
-        Fetches the summary data for all live matches from live2.xml.
-        This data includes tournament names for filtering.
-        """
         try:
             logging.info(f"Fetching live matches summary...")
             if "livescore" not in self.driver.current_url:
@@ -101,7 +86,6 @@ class TenipoScraper:
                 raise ValueError("Payload decoding returned empty result.")
 
             root = ET.fromstring(decompressed_xml_bytes)
-            # The structure is <xml><match>...</match><match>...</match></xml>, so we find all 'match' children of the root.
             live_matches = [self._xml_to_dict(match_tag) for match_tag in root.findall("./match")]
             logging.info(f"Found {len(live_matches)} total live matches in summary.")
             return live_matches
@@ -110,9 +94,6 @@ class TenipoScraper:
             return []
 
     def fetch_match_data(self, match_id: str) -> dict:
-        """
-        Fetches and decodes detailed data for a single match ID.
-        """
         try:
             if "livescore" not in self.driver.current_url:
                 logging.info("Not on the livescore page, navigating back to ensure decoder is available.")
