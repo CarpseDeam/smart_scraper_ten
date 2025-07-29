@@ -1,5 +1,6 @@
 import logging
 import base64
+import time
 from lxml import etree as ET
 from typing import List, Dict, Any
 
@@ -70,22 +71,27 @@ class TenipoScraper:
         try:
             del self.driver.requests
             self.driver.get(str(self.settings.LIVESCORE_PAGE_URL))
-            # Wait for EITHER live2.xml or change2.xml to be requested.
-            self.driver.wait_for_request(r'/(live2|change2)\.xml', timeout=20)
 
-            # Find all potential data requests and identify the best one (largest).
+            # Specifically wait for the change2.xml file, ignoring the live2.xml decoy.
+            self.driver.wait_for_request(r'/change2\.xml', timeout=20)
+
+            # The site sends multiple change2.xml files. Let's wait a moment to capture them.
+            time.sleep(3)
+
+            # Now, inspect all the change2.xml requests we captured.
             candidate_requests = [
                 r for r in self.driver.requests
-                if r.response and ('/live2.xml' in r.path or '/change2.xml' in r.path)
+                if r.response and '/change2.xml' in r.path
             ]
 
             if not candidate_requests:
-                logging.warning("No live2.xml or change2.xml data requests were found.")
+                logging.warning("No 'change2.xml' data requests were captured.")
                 return []
 
-            # Assume the largest request is the main data payload.
+            # Assume the largest payload is the most comprehensive one.
             best_request = sorted(candidate_requests, key=lambda r: len(r.response.body), reverse=True)[0]
-            logging.info(f"Identified '{best_request.path}' as best candidate (size: {len(best_request.response.body)} bytes).")
+            logging.info(
+                f"Identified '{best_request.path}' as best candidate (size: {len(best_request.response.body)} bytes).")
 
             decompressed_xml_bytes = self._decode_payload(best_request.response.body)
             if not decompressed_xml_bytes: return []
@@ -99,7 +105,8 @@ class TenipoScraper:
                 match_tags = root.findall("./event")
             return [self._xml_to_dict(tag) for tag in match_tags]
         except TimeoutException:
-            logging.warning("Timed out waiting for a data request (live2.xml or change2.xml).")
+            logging.warning(
+                "Timed out waiting for a data request (change2.xml). The site may not have live ITF matches right now.")
             return []
         except Exception as e:
             logging.error(f"Error in get_live_matches_summary: {e}", exc_info=True)
