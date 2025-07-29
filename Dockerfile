@@ -14,14 +14,10 @@ WORKDIR /app
 COPY requirements.txt .
 
 # Install Python dependencies from requirements.txt
+# This now only includes fastapi, uvicorn, gunicorn, pydantic-settings, and httpx.
+# No more heavy browser libraries.
 RUN pip install --no-cache-dir --upgrade pip
 RUN pip install --no-cache-dir -r requirements.txt
-
-# Correctly install Playwright's browser and its OS dependencies.
-# First, install the system dependencies for Chromium.
-RUN playwright install-deps chromium
-# Then, download the actual Chromium browser binary managed by Playwright.
-RUN playwright install chromium
 
 # Copy the rest of your application code into the container
 COPY . .

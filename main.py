@@ -6,11 +6,11 @@ from datetime import datetime, timezone
 from fastapi import FastAPI, HTTPException
 
 import config
-from smart_scraper import TenipoScraper
+from smart_scraper import TenipoClient  # We keep the filename, but it's our new client
 from data_mapper import transform_match_data_to_client_format
 
 # --- Globals & Caching Setup ---
-scraper_container = {}
+client_container = {}  # Renamed for clarity
 app_settings = config.Settings()
 
 live_data_cache = {
@@ -22,20 +22,14 @@ CACHE_EXPIRATION_SECONDS = 30
 
 # --- Background Task ---
 async def poll_for_live_data():
-    """A background task that runs continuously to keep the cache fresh using Playwright."""
-    scraper = TenipoScraper(app_settings)
-    try:
-        await scraper.start()
-        scraper_container["scraper_instance"] = scraper
-    except Exception as e:
-        logging.critical(f"BACKGROUND_POLL: Playwright scraper failed to start. Polling cannot begin. Error: {e}",
-                         exc_info=True)
-        return
+    """A background task that runs continuously to keep the cache fresh using the HTTP client."""
+    client = TenipoClient(app_settings)
+    client_container["instance"] = client
 
     while True:
         logging.info("BACKGROUND_POLL: Starting polling cycle...")
         try:
-            all_matches = await scraper.get_live_matches_summary()
+            all_matches = await client.get_live_matches_summary()
             itf_matches_summary = [
                 m for m in all_matches if m and "ITF" in m.get("tournament_name", "")
             ]
@@ -45,7 +39,7 @@ async def poll_for_live_data():
                 match_id = match_summary.get("id")
                 if not match_id: continue
 
-                raw_data = await scraper.fetch_match_data(match_id)
+                raw_data = await client.fetch_match_data(match_id)
                 if raw_data:
                     formatted_data = transform_match_data_to_client_format(raw_data)
                     new_cache_data[match_id] = formatted_data
@@ -57,8 +51,7 @@ async def poll_for_live_data():
         except Exception as e:
             logging.error(f"BACKGROUND_POLL: Error during polling cycle: {e}", exc_info=True)
 
-        finally:
-            await asyncio.sleep(CACHE_EXPIRATION_SECONDS)
+        await asyncio.sleep(CACHE_EXPIRATION_SECONDS)
 
 
 # --- FastAPI Lifespan & App ---
@@ -67,18 +60,17 @@ async def lifespan(app: FastAPI):
     logging.info("Application startup: Starting background polling task...")
     loop = asyncio.get_event_loop()
     task = loop.create_task(poll_for_live_data())
-    scraper_container["polling_task"] = task
+    client_container["polling_task"] = task
 
     yield
 
     logging.info("Application shutdown: Cleaning up resources...")
-    if "polling_task" in scraper_container:
-        scraper_container["polling_task"].cancel()
-    if "scraper_instance" in scraper_container:
-        scraper = scraper_container["scraper_instance"]
-        # Ensure scraper close is awaited
+    if "polling_task" in client_container:
+        client_container["polling_task"].cancel()
+    if "instance" in client_container:
+        instance = client_container["instance"]
         loop = asyncio.get_event_loop()
-        loop.create_task(scraper.close())
+        loop.create_task(instance.close())
     logging.info("Shutdown cleanup initiated.")
 
 

@@ -1,19 +1,14 @@
-# The core browser automation library
-selenium
+# The core web framework
+fastapi
 
-# The extension for Selenium that lets us inspect network traffic
-selenium-wire
+# The ASGI server to run the application
+uvicorn
+
+# A production-grade process manager for uvicorn
+gunicorn
 
 # For data validation and elegant settings management
 pydantic-settings
-blinker==1.7.0
-packaging
-brotli
-setuptools
 
-# For creating the API to serve our data
-fastapi
-
-playwright
-uvicorn
-gunicorn
+# A modern, async-capable HTTP client
+httpx
