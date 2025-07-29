@@ -12,7 +12,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 class TenipoClient:
     """
     A high-performance, asynchronous HTTP client for fetching and decoding data from Tenipo.
-    This client mimics a real browser's headers to avoid being blocked.
+    This client mimics a real browser's headers and is robust against malformed server responses.
     """
 
     def __init__(self, settings: config.Settings):
@@ -24,24 +24,27 @@ class TenipoClient:
             "Accept-Language": "en-US,en;q=0.9",
             "Referer": str(self.settings.LIVESCORE_PAGE_URL)
         }
-        self.client = httpx.AsyncClient(
-            headers=self.DEFAULT_HEADERS,
-            timeout=30.0
-        )
+        self.client = httpx.AsyncClient(headers=self.DEFAULT_HEADERS, timeout=30.0)
         logging.info("TenipoClient initialized with httpx and stealth headers.")
 
     async def close(self):
-        """Closes the HTTP client session gracefully."""
         await self.client.aclose()
         logging.info("TenipoClient httpx session closed.")
 
     def _decode_payload(self, payload: bytes) -> bytes:
         """
         The reverse-engineered multi-step decoding function for Tenipo's data payloads.
+        Now includes defensive padding for malformed Base64 strings.
         """
+        # Guard clause for empty payloads from the server
+        if not payload:
+            return b""
+
         try:
             decoded_b64_bytes = base64.b64decode(payload)
             data_len = len(decoded_b64_bytes)
+            if data_len == 0: return b""
+
             char_list = []
             for i, byte_val in enumerate(decoded_b64_bytes):
                 shift = (i % data_len - i % 4) * data_len + 64
@@ -51,13 +54,18 @@ class TenipoClient:
             second_base64_string = "".join(char_list)
 
             # ===================================================================
-            # ===> THE FINAL FIX: Encoding the string before the final decode <===
-            final_xml_bytes = base64.b64decode(second_base64_string.encode('latin-1'))
+            # ===> THE PADDING FIX: Make the string valid before decoding <===
+            # Some server responses are missing the Base64 padding. We add it back.
+            missing_padding = len(second_base64_string) % 4
+            if missing_padding:
+                second_base64_string += '=' * (4 - missing_padding)
             # ===================================================================
 
+            final_xml_bytes = base64.b64decode(second_base64_string.encode('latin-1'))
             return final_xml_bytes
         except Exception as e:
-            logging.error(f"Payload decoding failed: {e}", exc_info=False)  # Keep logs clean
+            # This will catch both decoding and padding errors for junk payloads.
+            logging.error(f"Payload decoding failed, likely a junk payload from server. Error: {e}")
             return b""
 
     def _xml_to_dict(self, element: ET.Element) -> dict:
@@ -81,9 +89,16 @@ class TenipoClient:
             response.raise_for_status()
             decompressed_xml_bytes = self._decode_payload(response.content)
             if not decompressed_xml_bytes:
-                raise ValueError("Payload decoding returned empty result.")
+                # This is now an expected outcome for junk payloads, so we just log and continue.
+                logging.info("Payload was empty or junk after decoding. Skipping.")
+                return []
             root = ET.fromstring(decompressed_xml_bytes)
             return [self._xml_to_dict(tag) for tag in root.findall("./match")]
+        except ET.ParseError:
+            # This was our other error. It means the padding fix worked, but the XML is still funky.
+            # This is a rare edge case, but we handle it gracefully.
+            logging.warning("XML was not well-formed after decoding. Server may have sent a non-XML payload.")
+            return []
         except Exception as e:
             logging.error(f"Error in get_live_matches_summary: {e}")
             return []
@@ -96,7 +111,8 @@ class TenipoClient:
             response.raise_for_status()
             decompressed_xml_bytes = self._decode_payload(response.content)
             if not decompressed_xml_bytes:
-                raise ValueError(f"Payload decoding returned empty result for match {match_id}")
+                logging.info(f"Payload for match {match_id} was empty or junk. Skipping.")
+                return {}
             root = ET.fromstring(decompressed_xml_bytes)
             return self._xml_to_dict(root)
         except Exception as e:
