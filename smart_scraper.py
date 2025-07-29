@@ -1,6 +1,6 @@
 import logging
 import base64
-from lxml import etree as ET  # <--- Use the powerful lxml parser
+from lxml import etree as ET
 import httpx
 from typing import List, Dict, Any
 
@@ -73,10 +73,14 @@ class TenipoClient:
                 logging.info("Payload was empty or junk after decoding. Skipping.")
                 return []
 
-            # ===================================================================
-            # ===> THE FINAL POLISH: Use a recovering parser for bad XML <===
             parser = ET.XMLParser(recover=True)
             root = ET.fromstring(decompressed_xml_bytes, parser=parser)
+
+            # ===================================================================
+            # ===> THE FINAL FIX: Handle cases where the parser returns None <===
+            if root is None:
+                logging.warning("XML was unrecoverably broken after decoding. Skipping payload.")
+                return []
             # ===================================================================
 
             return [self._xml_to_dict(tag) for tag in root.findall("./match")]
@@ -94,9 +98,13 @@ class TenipoClient:
                 logging.info(f"Payload for match {match_id} was empty or junk. Skipping.")
                 return {}
 
-            # ===> Applying the same recovering parser here <===
             parser = ET.XMLParser(recover=True)
             root = ET.fromstring(decompressed_xml_bytes, parser=parser)
+
+            # ===> Applying the same safety check here <===
+            if root is None:
+                logging.warning(f"XML for match {match_id} was unrecoverably broken. Skipping.")
+                return {}
 
             return self._xml_to_dict(root)
         except Exception as e:
