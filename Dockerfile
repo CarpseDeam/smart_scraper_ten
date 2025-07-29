@@ -17,9 +17,11 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Let Playwright install its own, stable browser binaries and dependencies.
-# This is far more reliable than installing Chrome manually.
-RUN playwright install --with-deps chrome
+# Correctly install Playwright's browser and its OS dependencies.
+# First, install the system dependencies for Chromium.
+RUN playwright install-deps chromium
+# Then, download the actual Chromium browser binary managed by Playwright.
+RUN playwright install chromium
 
 # Copy the rest of your application code into the container
 COPY . .
