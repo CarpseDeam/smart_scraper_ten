@@ -1,5 +1,4 @@
 import logging
-import base64
 from lxml import etree as ET
 from typing import List, Dict, Any
 
@@ -56,16 +55,12 @@ class TenipoScraper:
             request = self.driver.wait_for_request(r'/change2\.xml', timeout=25)
             logging.info(f"'change2.xml' request captured (size: {len(request.response.body)} bytes).")
 
-            # THE FIX: We use the browser's own JavaScript decoder function.
-            # The function `janko()` is loaded when we visit the livescore page.
-            # We pass the raw response body, base64 encoded, to the script.
+            # THE CORRECT IMPLEMENTATION:
+            # The server's response IS the base64 payload. We just need to decode the bytes into a string.
+            payload_str = request.response.body.decode('latin-1')
 
-            # Step 1: Base64 encode the raw bytes so we can pass it as a clean string to JavaScript
-            payload_b64 = base64.b64encode(request.response.body).decode('ascii')
-
-            # Step 2: Execute the site's own decoder function on the payload
-            logging.info("Executing site's native JavaScript decoder...")
-            decoded_xml_string = self.driver.execute_script("return janko(arguments[0]);", payload_b64)
+            logging.info("Executing site's native JavaScript decoder on the payload...")
+            decoded_xml_string = self.driver.execute_script("return janko(arguments[0]);", payload_str)
 
             if not decoded_xml_string:
                 logging.warning("JavaScript decoder returned an empty result.")
@@ -73,8 +68,7 @@ class TenipoScraper:
 
             logging.info(f"Successfully decoded payload using JS. (First 100 bytes: {decoded_xml_string[:100]})")
 
-            # Step 3: Parse the now-clean XML
-            parser = ET.XMLParser(recover=True)
+            parser = ET.XMLParser(recover=True, encoding='utf-8')
             root = ET.fromstring(decoded_xml_string.encode('utf-8'), parser=parser)
 
             if root is None:
@@ -103,12 +97,12 @@ class TenipoScraper:
             request = self.driver.wait_for_request(match_xml_full_url, timeout=20)
             if not (request and request.response): return {}
 
-            payload_b64 = base64.b64encode(request.response.body).decode('ascii')
-            decoded_xml_string = self.driver.execute_script("return janko(arguments[0]);", payload_b64)
+            payload_str = request.response.body.decode('latin-1')
+            decoded_xml_string = self.driver.execute_script("return janko(arguments[0]);", payload_str)
 
             if not decoded_xml_string: return {}
 
-            parser = ET.XMLParser(recover=True)
+            parser = ET.XMLParser(recover=True, encoding='utf-8')
             root = ET.fromstring(decoded_xml_string.encode('utf-8'), parser=parser)
 
             if root is None: return {}
