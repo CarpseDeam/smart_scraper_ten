@@ -8,6 +8,7 @@ import config
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
+
 class TenipoClient:
     """
     A high-performance, asynchronous HTTP client for fetching and decoding data from Tenipo.
@@ -16,13 +17,12 @@ class TenipoClient:
 
     def __init__(self, settings: config.Settings):
         self.settings = settings
-        # These headers are crucial for mimicking a real browser request
         self.DEFAULT_HEADERS = {
             "User-Agent": self.settings.USER_AGENT,
             "Accept": "application/xml, text/xml, */*; q=0.01",
             "Accept-Encoding": "gzip, deflate, br",
             "Accept-Language": "en-US,en;q=0.9",
-            "Referer": str(self.settings.LIVESCORE_PAGE_URL) # The server expects this!
+            "Referer": str(self.settings.LIVESCORE_PAGE_URL)
         }
         self.client = httpx.AsyncClient(
             headers=self.DEFAULT_HEADERS,
@@ -45,8 +45,14 @@ class TenipoClient:
             char_list = []
             for i, byte_val in enumerate(decoded_b64_bytes):
                 shift = (i % data_len - i % 4) * data_len + 64
-                new_char_code = byte_val - shift
+
+                # ===================================================================
+                # ===> THE FINAL FIX: Emulate JavaScript's "wrap-around" math <===
+                new_char_code = (byte_val - shift) % 256
+                # ===================================================================
+
                 char_list.append(chr(new_char_code))
+
             second_base64_string = "".join(char_list)
             final_xml_bytes = base64.b64decode(second_base64_string)
             return final_xml_bytes
@@ -81,7 +87,6 @@ class TenipoClient:
                 raise ValueError("Payload decoding returned empty result.")
 
             root = ET.fromstring(decompressed_xml_bytes)
-            # The summary XML uses 'match' tags
             live_matches = [self._xml_to_dict(match_tag) for match_tag in root.findall("./match")]
             logging.info(f"Found {len(live_matches)} total live matches in summary.")
             return live_matches
@@ -106,7 +111,6 @@ class TenipoClient:
                 raise ValueError(f"Payload decoding returned empty result for match {match_id}")
 
             root = ET.fromstring(decompressed_xml_bytes)
-            # The detailed match data has a single root 'match' tag
             return self._xml_to_dict(root)
         except Exception as e:
             logging.error(f"An unexpected error occurred in fetch_match_data for ID {match_id}: {e}")
