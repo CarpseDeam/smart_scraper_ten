@@ -1,14 +1,5 @@
-# The core web framework
 fastapi
-
-# The ASGI server to run the application
 uvicorn
-
-# A production-grade process manager for uvicorn
 gunicorn
-
-# For data validation and elegant settings management
 pydantic-settings
-
-# A modern, async-capable HTTP client
-httpx
+playwright
