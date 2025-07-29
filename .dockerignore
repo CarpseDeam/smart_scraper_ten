@@ -1,0 +1,28 @@
+# .dockerignore
+
+# Git files
+.git
+.gitignore
+.dockerignore
+
+# Python virtual environment
+venv
+.venv
+
+# Python cache files
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+
+# Pytest cache
+.pytest_cache
+
+# IDE and OS specific files
+.idea
+.vscode
+*.DS_Store
+
+# Environment files (should never be in the container)
+.env
+*.env
