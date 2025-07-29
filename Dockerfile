@@ -38,6 +38,6 @@ COPY . .
 # Expose the port the app will run on. Railway provides this via the $PORT variable.
 EXPOSE 8000
 
-# Command to run the application using Gunicorn as a production-ready process manager
-# for Uvicorn workers. This "shell form" allows the ${PORT} variable to be correctly interpreted.
-CMD gunicorn -k uvicorn.workers.UvicornWorker -w 2 main:app --bind 0.0.0.0:${PORT:-8000}
+# Final, most robust command form.
+# We explicitly invoke a shell to ensure the ${PORT} variable is substituted.
+CMD ["/bin/sh", "-c", "gunicorn -k uvicorn.workers.UvicornWorker -w 2 main:app --bind 0.0.0.0:${PORT:-8000}"]
