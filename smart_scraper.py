@@ -1,11 +1,13 @@
 import logging
 import base64
 import json
+import time # Import the time module
 import xml.etree.ElementTree as ET
 
 import config
 from seleniumwire import webdriver
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service # Import the Service object
 from selenium.common.exceptions import TimeoutException, WebDriverException
 
 # Configure logging for the module
@@ -22,7 +24,6 @@ class TenipoScraper:
 
     def _setup_driver(self) -> webdriver.Chrome:
         chrome_options = Options()
-        # --- THE KITCHEN SINK OF STABILITY FIXES ---
         chrome_options.add_argument("--headless")
         chrome_options.add_argument("--no-sandbox")
         chrome_options.add_argument("--disable-dev-shm-usage")
@@ -33,14 +34,27 @@ class TenipoScraper:
         chrome_options.add_argument("--log-level=3")
         chrome_options.add_argument("--single-process")
         chrome_options.add_argument("--user-data-dir=/tmp/chrome-user-data")
-        chrome_options.add_argument("--remote-debugging-port=9222") # Added for stability
+        chrome_options.add_argument("--remote-debugging-port=9222")
         chrome_options.add_argument("--window-size=1920,1080")
-        # --- END FIXES ---
-
         chrome_options.add_argument(f"user-agent={self.settings.USER_AGENT}")
+
         seleniumwire_options = {'disable_encoding': True}
+
         try:
-            driver = webdriver.Chrome(options=chrome_options, seleniumwire_options=seleniumwire_options)
+            # --- ROBUST STARTUP FIX ---
+            # 1. Explicitly manage the chromedriver process using a Service object.
+            # This is more stable and helps prevent zombie processes.
+            service = Service()
+
+            # 2. Instantiate the driver using the service.
+            driver = webdriver.Chrome(service=service, options=chrome_options, seleniumwire_options=seleniumwire_options)
+
+            # 3. Add a small delay to prevent race conditions on startup.
+            # This gives the browser process a moment to fully initialize.
+            logging.info("Driver instantiated, pausing for 2 seconds to ensure stability...")
+            time.sleep(2)
+            # --- END FIX ---
+
             driver.set_page_load_timeout(30)
             logging.info("SeleniumWire WebDriver initialized successfully.")
             return driver
@@ -73,7 +87,7 @@ class TenipoScraper:
             final_xml_bytes = decoded_xml_string.encode('utf-8')
             return final_xml_bytes
         except Exception as e:
-            logging.error(f"DECODING FAILED during JavaScript execution: {e} ({type(e).__name__})")
+            logging.error(f"DECODING FAILED during JavaScript execution: {e}", exc_info=True)
             return b""
 
     def get_live_matches_summary(self) -> list[dict]:
@@ -104,7 +118,6 @@ class TenipoScraper:
     def fetch_match_data(self, match_id: str) -> dict:
         try:
             if "livescore" not in self.driver.current_url:
-                logging.info("Not on the livescore page, navigating back to ensure decoder is available.")
                 self.driver.get(str(self.settings.LIVESCORE_PAGE_URL))
 
             match_xml_full_url = self.settings.MATCH_XML_URL_TEMPLATE.format(match_id=match_id)
