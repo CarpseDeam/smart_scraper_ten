@@ -1,6 +1,6 @@
 import logging
 import base64
-import gzip  # The correct library for this compression format
+import gzip  # The correct library for standard web decompression. This is the fix.
 import xml.etree.ElementTree as ET
 import httpx
 from typing import Optional
@@ -26,7 +26,8 @@ class TenipoClient:
 
     def _decode_payload(self, payload: bytes) -> bytes:
         """
-        Decodes the Base64 payload and then decompresses it using gzip.
+        Decodes the Base64 payload and then decompresses it using the GZIP algorithm.
+        This is the correct, standard two-step process.
         """
         try:
             # Step 1: Decode from Base64
