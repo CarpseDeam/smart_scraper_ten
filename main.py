@@ -32,6 +32,10 @@ async def poll_for_live_data():
             itf_matches_summary = [m for m in all_matches_summary if m and "ITF" in m.get("tournament_name", "")]
             logging.info(f"Found {len(itf_matches_summary)} live ITF matches to process.")
 
+            if mongo_manager and mongo_manager.client:
+                live_match_ids = [m['id'] for m in itf_matches_summary if m and 'id' in m]
+                await loop.run_in_executor(None, lambda: mongo_manager.prune_completed_matches(live_match_ids))
+
             new_cache_data = {}
             for match_summary in itf_matches_summary:
                 match_id = match_summary.get("id")
@@ -42,7 +46,6 @@ async def poll_for_live_data():
                     formatted_data = transform_match_data_to_client_format(raw_data)
                     new_cache_data[match_id] = formatted_data
 
-                    # --- SAVE TO DATABASE ---
                     if mongo_manager and mongo_manager.client:
                         await loop.run_in_executor(None,
                                                    lambda: mongo_manager.save_match_data(match_id, formatted_data))
@@ -59,19 +62,16 @@ async def poll_for_live_data():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logging.info("Application startup: Initializing resources...")
-    # Initialize the scraper
     try:
         scraper = await asyncio.get_event_loop().run_in_executor(None, lambda: TenipoScraper(app_settings))
         app_container["scraper_instance"] = scraper
     except Exception as e:
         logging.critical(f"FATAL: Scraper initialization failed. Application will not start polling. Error: {e}")
-        scraper = None  # Ensure scraper is None if it fails
+        scraper = None
 
-    # Initialize the database connection
     mongo_manager = MongoManager(app_settings)
     app_container["mongo_manager"] = mongo_manager
 
-    # Start the background polling task only if the scraper initialized successfully
     if scraper:
         polling_task = asyncio.create_task(poll_for_live_data())
         app_container["polling_task"] = polling_task
@@ -113,3 +113,19 @@ async def get_match_data(match_id: str):
     if not match_data:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Match ID '{match_id}' not found.")
     return match_data
+
+
+@app.get("/investigate/{match_id}", status_code=status.HTTP_200_OK)
+async def investigate_match(match_id: str):
+    """
+    A temporary debugging endpoint to find new data sources for a given match.
+    """
+    scraper = app_container.get("scraper_instance")
+    if not scraper:
+        raise HTTPException(status_code=503, detail="Scraper not available.")
+
+    logging.info(f"Received investigation request for match ID: {match_id}")
+    urls = await asyncio.get_event_loop().run_in_executor(None, lambda: scraper.investigate_data_sources(match_id))
+
+    return {"message": "Investigation complete. Check logs for captured URLs.", "match_id": match_id,
+            "urls_found": len(urls)}

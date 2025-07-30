@@ -22,7 +22,7 @@ class Settings(BaseSettings):
         description="The full connection string URI for the MongoDB database."
     )
     MONGO_DB_NAME: str = Field(
-        default="tennis_livescores",
+        default="edgeAI",  # This is the corrected database name from the client.
         description="The name of the database to use within MongoDB."
     )
 

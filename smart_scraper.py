@@ -14,7 +14,6 @@ class TenipoScraper:
     def __init__(self, settings: config.Settings):
         self.settings = settings
         self.driver: webdriver.Chrome = self._setup_driver()
-        # Load the page once to get the all-important janko() decoder into the browser context.
         self.driver.get(str(self.settings.LIVESCORE_PAGE_URL))
         logging.info("TenipoScraper (Selenium) initialized and page context loaded.")
 
@@ -50,72 +49,63 @@ class TenipoScraper:
     def get_live_matches_summary(self) -> List[Dict[str, Any]]:
         try:
             del self.driver.requests
-            self.driver.get(str(self.settings.LIVESCORE_PAGE_URL))  # Refresh the page to get the latest updates
-
-            logging.info("Waiting for 'change2.xml' summary data request...")
+            self.driver.get(str(self.settings.LIVESCORE_PAGE_URL))
             request = self.driver.wait_for_request(r'/change2\.xml', timeout=25)
-            logging.info(f"'change2.xml' request captured (size: {len(request.response.body)} bytes).")
-
-            # Use the site's native JS decoder
             payload_str = request.response.body.decode('latin-1')
             decoded_xml_string = self.driver.execute_script("return janko(arguments[0]);", payload_str)
-
-            if not decoded_xml_string:
-                logging.warning("JavaScript decoder returned an empty result for summary.")
-                return []
-
-            logging.info(f"Successfully decoded summary payload using JS.")
+            if not decoded_xml_string: return []
             parser = ET.XMLParser(recover=True, encoding='utf-8')
             root = ET.fromstring(decoded_xml_string.encode('utf-8'), parser=parser)
             if root is None: return []
-
-            match_tags = root.findall("./match")
-            if not match_tags: match_tags = root.findall("./event")
-
+            match_tags = root.findall("./match") or root.findall("./event")
             logging.info(f"Found {len(match_tags)} match/event tags in summary XML.")
             return [self._xml_to_dict(tag) for tag in match_tags]
-
-        except TimeoutException:
-            logging.warning("TIMEOUT: No 'change2.xml' request was detected. Normal if no ITF matches are live.")
-            return []
         except Exception as e:
             logging.error(f"Error in get_live_matches_summary: {e}", exc_info=True)
             return []
 
     def fetch_match_data(self, match_id: str) -> Dict[str, Any]:
         match_xml_full_url = self.settings.MATCH_XML_URL_TEMPLATE.format(match_id=match_id)
-        # Construct the URL to the specific match page to trigger the data load.
         match_page_url = f"https://tenipo.com/match/-/{match_id}"
-
         try:
             del self.driver.requests
             self.driver.get(match_page_url)
-
-            logging.info(f"Waiting for detail request: {match_xml_full_url}")
             request = self.driver.wait_for_request(match_xml_full_url, timeout=20)
-            logging.info(f"Detail request for match {match_id} captured.")
-
-            # THE SAME FIX, APPLIED HERE: Use the site's native JS decoder
             payload_str = request.response.body.decode('latin-1')
             decoded_xml_string = self.driver.execute_script("return janko(arguments[0]);", payload_str)
-
-            if not decoded_xml_string:
-                logging.warning(f"JavaScript decoder returned empty result for match {match_id}.")
-                return {}
-
-            logging.info(f"Successfully decoded detail payload for match {match_id}.")
+            if not decoded_xml_string: return {}
             parser = ET.XMLParser(recover=True, encoding='utf-8')
             root = ET.fromstring(decoded_xml_string.encode('utf-8'), parser=parser)
             if root is None: return {}
-
             return self._xml_to_dict(root)
-        except TimeoutException:
-            logging.error(
-                f"TIMEOUT waiting for match detail XML for ID {match_id}. The page might not have loaded the data correctly.")
-            return {}
         except Exception as e:
             logging.error(f"Error in fetch_match_data for ID {match_id}: {e}", exc_info=True)
             return {}
+
+    def investigate_data_sources(self, match_id: str) -> List[str]:
+        """
+        Navigates to a match page and logs all captured requests to find new data sources.
+        This is a special function for debugging and discovery.
+        """
+        match_page_url = f"https://tenipo.com/match/-/{match_id}"
+        logging.info(f"INVESTIGATION_MODE: Navigating to {match_page_url}")
+        try:
+            del self.driver.requests
+            self.driver.get(match_page_url)
+            # Give the page plenty of time to make all its requests, especially streaming ones.
+            logging.info("INVESTIGATION_MODE: Waiting 30 seconds to capture all requests...")
+            self.driver.wait_for_request(r'.', timeout=30)  # This will timeout, which is fine
+        except TimeoutException:
+            logging.info("INVESTIGATION_MODE: Capture period finished.")
+        except Exception as e:
+            logging.error(f"INVESTIGATION_MODE: An error occurred: {e}", exc_info=True)
+
+        captured_urls = [r.path for r in self.driver.requests if r.response]
+        logging.info("INVESTIGATION_MODE: Captured the following URLs:")
+        for url in sorted(list(set(captured_urls))):  # Print unique URLs
+            logging.info(f"  -> {url}")
+
+        return captured_urls
 
     def close(self):
         if self.driver:
