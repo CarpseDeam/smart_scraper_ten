@@ -8,6 +8,7 @@ from fastapi import FastAPI, HTTPException, status
 import config
 from smart_scraper import TenipoScraper
 from data_mapper import transform_match_data_to_client_format
+from database import MongoManager
 
 app_container = {}
 app_settings = config.Settings()
@@ -17,12 +18,11 @@ CACHE_REFRESH_INTERVAL_SECONDS = 30
 
 async def poll_for_live_data():
     loop = asyncio.get_event_loop()
+    scraper = app_container.get("scraper_instance")
+    mongo_manager = app_container.get("mongo_manager")
 
-    try:
-        scraper = await loop.run_in_executor(None, lambda: TenipoScraper(app_settings))
-        app_container["scraper_instance"] = scraper
-    except Exception as e:
-        logging.critical(f"FATAL: Scraper initialization failed. Polling cannot start. Error: {e}")
+    if not scraper:
+        logging.critical("Scraper not found in app_container. Polling cannot start.")
         return
 
     while True:
@@ -42,11 +42,16 @@ async def poll_for_live_data():
                     formatted_data = transform_match_data_to_client_format(raw_data)
                     new_cache_data[match_id] = formatted_data
 
+                    # --- SAVE TO DATABASE ---
+                    if mongo_manager and mongo_manager.client:
+                        await loop.run_in_executor(None,
+                                                   lambda: mongo_manager.save_match_data(match_id, formatted_data))
+
             live_data_cache["data"] = new_cache_data
             live_data_cache["last_updated"] = datetime.now(timezone.utc)
             logging.info(f"BACKGROUND_POLL: Cache updated with {len(new_cache_data)} matches.")
         except Exception as e:
-            logging.error(f"BACKGROUND_POLL: Error during polling cycle: {e}")
+            logging.error(f"BACKGROUND_POLL: Error during polling cycle: {e}", exc_info=True)
 
         await asyncio.sleep(CACHE_REFRESH_INTERVAL_SECONDS)
 
@@ -54,14 +59,34 @@ async def poll_for_live_data():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logging.info("Application startup: Initializing resources...")
-    polling_task = asyncio.create_task(poll_for_live_data())
-    app_container["polling_task"] = polling_task
+    # Initialize the scraper
+    try:
+        scraper = await asyncio.get_event_loop().run_in_executor(None, lambda: TenipoScraper(app_settings))
+        app_container["scraper_instance"] = scraper
+    except Exception as e:
+        logging.critical(f"FATAL: Scraper initialization failed. Application will not start polling. Error: {e}")
+        scraper = None  # Ensure scraper is None if it fails
+
+    # Initialize the database connection
+    mongo_manager = MongoManager(app_settings)
+    app_container["mongo_manager"] = mongo_manager
+
+    # Start the background polling task only if the scraper initialized successfully
+    if scraper:
+        polling_task = asyncio.create_task(poll_for_live_data())
+        app_container["polling_task"] = polling_task
+    else:
+        polling_task = None
+
     yield
+
     logging.info("Application shutdown: Cleaning up resources...")
     if polling_task:
         polling_task.cancel()
     if scraper := app_container.get("scraper_instance"):
         await asyncio.get_event_loop().run_in_executor(None, scraper.close)
+    if mongo_manager := app_container.get("mongo_manager"):
+        mongo_manager.close()
     logging.info("Shutdown cleanup complete.")
 
 

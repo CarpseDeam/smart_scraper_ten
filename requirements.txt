@@ -15,3 +15,6 @@ blinker==1.7.0
 
 # CRITICAL DEPENDENCY FIX #2: Explicitly install setuptools.
 setuptools
+
+# DATABASE DEPENDENCIES
+pymongo
