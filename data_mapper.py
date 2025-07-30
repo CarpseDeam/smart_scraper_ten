@@ -20,6 +20,19 @@ def _safe_get_from_list(data_list, index, default=None):
         return default
 
 
+def _to_int_score(value):
+    """
+    Safely converts a score value to an integer.
+    Handles regular scores ('6'), tie-break scores as decimals ('6.4'), and missing values.
+    """
+    try:
+        # Convert to float first to handle decimals, then to int to truncate.
+        return int(float(value))
+    except (ValueError, TypeError):
+        # Return 0 if value is None, empty, or can't be converted.
+        return 0
+
+
 def _parse_player_info(player_str, country_str):
     """Parses player and country strings into a structured dict."""
     name = player_str.replace(" (Q)", "").replace(" (WC)", "").strip()
@@ -141,16 +154,16 @@ def transform_match_data_to_client_format(raw_data: dict) -> dict:
         "players": [p1_info, p2_info],
         "score": {
             "sets": [
-                {"p1": int(_safe_get_from_dict(match_info, "set11", 0)),
-                 "p2": int(_safe_get_from_dict(match_info, "set12", 0))},
-                {"p1": int(_safe_get_from_dict(match_info, "set21", 0)),
-                 "p2": int(_safe_get_from_dict(match_info, "set22", 0))},
-                {"p1": int(_safe_get_from_dict(match_info, "set31", 0)),
-                 "p2": int(_safe_get_from_dict(match_info, "set32", 0))},
-                {"p1": int(_safe_get_from_dict(match_info, "set41", 0)),
-                 "p2": int(_safe_get_from_dict(match_info, "set42", 0))},
-                {"p1": int(_safe_get_from_dict(match_info, "set51", 0)),
-                 "p2": int(_safe_get_from_dict(match_info, "set52", 0))},
+                {"p1": _to_int_score(_safe_get_from_dict(match_info, "set11", 0)),
+                 "p2": _to_int_score(_safe_get_from_dict(match_info, "set12", 0))},
+                {"p1": _to_int_score(_safe_get_from_dict(match_info, "set21", 0)),
+                 "p2": _to_int_score(_safe_get_from_dict(match_info, "set22", 0))},
+                {"p1": _to_int_score(_safe_get_from_dict(match_info, "set31", 0)),
+                 "p2": _to_int_score(_safe_get_from_dict(match_info, "set32", 0))},
+                {"p1": _to_int_score(_safe_get_from_dict(match_info, "set41", 0)),
+                 "p2": _to_int_score(_safe_get_from_dict(match_info, "set42", 0))},
+                {"p1": _to_int_score(_safe_get_from_dict(match_info, "set51", 0)),
+                 "p2": _to_int_score(_safe_get_from_dict(match_info, "set52", 0))},
             ],
             "currentGame": {
                 "p1": _safe_get_from_dict(match_info, "game1"),
