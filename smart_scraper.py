@@ -34,6 +34,7 @@ class TenipoScraper:
             raise
 
     def _xml_to_dict(self, element: ET.Element) -> dict:
+        if element is None: return {}
         result = {}
         if element.attrib: result.update(element.attrib)
         if element.text and element.text.strip(): result['#text'] = element.text.strip()
@@ -65,47 +66,38 @@ class TenipoScraper:
             return []
 
     def fetch_match_data(self, match_id: str) -> Dict[str, Any]:
-        match_xml_full_url = self.settings.MATCH_XML_URL_TEMPLATE.format(match_id=match_id)
         match_page_url = f"https://tenipo.com/match/-/{match_id}"
         try:
             del self.driver.requests
             self.driver.get(match_page_url)
-            request = self.driver.wait_for_request(match_xml_full_url, timeout=20)
-            payload_str = request.response.body.decode('latin-1')
-            decoded_xml_string = self.driver.execute_script("return janko(arguments[0]);", payload_str)
-            if not decoded_xml_string: return {}
+
+            # Fetch both data files simultaneously
+            match_req = self.driver.wait_for_request(f'/xmlko/match{match_id}.xml', timeout=20)
+            pbp_req = self.driver.wait_for_request(f'/xmlko/matchl{match_id}.xml', timeout=20)
+
+            # Decode the main match data
+            match_payload_str = match_req.response.body.decode('latin-1')
+            match_xml_str = self.driver.execute_script("return janko(arguments[0]);", match_payload_str)
+            if not match_xml_str: return {}
+
+            # Decode the point-by-point data
+            pbp_payload_str = pbp_req.response.body.decode('latin-1')
+            pbp_xml_str = self.driver.execute_script("return janko(arguments[0]);", pbp_payload_str)
+
             parser = ET.XMLParser(recover=True, encoding='utf-8')
-            root = ET.fromstring(decoded_xml_string.encode('utf-8'), parser=parser)
-            if root is None: return {}
-            return self._xml_to_dict(root)
+            match_root = ET.fromstring(match_xml_str.encode('utf-8'), parser=parser)
+            pbp_root = ET.fromstring(pbp_xml_str.encode('utf-8'), parser=parser) if pbp_xml_str else None
+
+            # Combine the data
+            combined_data = self._xml_to_dict(match_root)
+            if pbp_root is not None:
+                combined_data['point_by_point'] = self._xml_to_dict(pbp_root)
+
+            return combined_data
+
         except Exception as e:
             logging.error(f"Error in fetch_match_data for ID {match_id}: {e}", exc_info=True)
             return {}
-
-    def investigate_data_sources(self, match_id: str) -> List[str]:
-        """
-        Navigates to a match page and logs all captured requests to find new data sources.
-        This is a special function for debugging and discovery.
-        """
-        match_page_url = f"https://tenipo.com/match/-/{match_id}"
-        logging.info(f"INVESTIGATION_MODE: Navigating to {match_page_url}")
-        try:
-            del self.driver.requests
-            self.driver.get(match_page_url)
-            # Give the page plenty of time to make all its requests, especially streaming ones.
-            logging.info("INVESTIGATION_MODE: Waiting 30 seconds to capture all requests...")
-            self.driver.wait_for_request(r'.', timeout=30)  # This will timeout, which is fine
-        except TimeoutException:
-            logging.info("INVESTIGATION_MODE: Capture period finished.")
-        except Exception as e:
-            logging.error(f"INVESTIGATION_MODE: An error occurred: {e}", exc_info=True)
-
-        captured_urls = [r.path for r in self.driver.requests if r.response]
-        logging.info("INVESTIGATION_MODE: Captured the following URLs:")
-        for url in sorted(list(set(captured_urls))):  # Print unique URLs
-            logging.info(f"  -> {url}")
-
-        return captured_urls
 
     def close(self):
         if self.driver:
