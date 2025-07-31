@@ -36,16 +36,17 @@ class MongoManager:
             return
 
         try:
-            matches_collection = self.db["matches"]
+            # FIX: Changed "matches" to "tenipo" to match your database.
+            matches_collection = self.db["tenipo"]
             result = matches_collection.update_one(
                 {"_id": match_id},
                 {"$set": data},
                 upsert=True
             )
             if result.upserted_id:
-                logging.info(f"DB: INSERTED new match with ID: {match_id}")
+                logging.info(f"DB: INSERTED new match with ID: {match_id} into collection 'tenipo'")
             elif result.modified_count > 0:
-                logging.info(f"DB: UPDATED existing match with ID: {match_id}")
+                logging.info(f"DB: UPDATED existing match with ID: {match_id} in collection 'tenipo'")
         except OperationFailure as e:
             logging.error(f"DB: A database operation failed for match ID {match_id}. Error: {e}")
         except Exception as e:
@@ -59,7 +60,8 @@ class MongoManager:
             logging.error("Cannot prune matches: MongoDB client is not connected.")
             return
         try:
-            matches_collection = self.db["matches"]
+            # FIX: Changed "matches" to "tenipo" to match your database.
+            matches_collection = self.db["tenipo"]
             stored_match_ids_cursor = matches_collection.find({}, {"_id": 1})
             stored_match_ids = {doc["_id"] for doc in stored_match_ids_cursor}
             live_ids_set = set(live_match_ids)
@@ -68,9 +70,9 @@ class MongoManager:
             if not ids_to_delete:
                 return
 
-            logging.info(f"DB_PRUNE: Found {len(ids_to_delete)} completed matches to prune: {ids_to_delete}")
+            logging.info(f"DB_PRUNE: Found {len(ids_to_delete)} completed matches to prune from 'tenipo': {ids_to_delete}")
             result = matches_collection.delete_many({"_id": {"$in": ids_to_delete}})
-            logging.info(f"DB_PRUNE: Successfully deleted {result.deleted_count} documents.")
+            logging.info(f"DB_PRUNE: Successfully deleted {result.deleted_count} documents from 'tenipo'.")
         except Exception as e:
             logging.error(f"DB_PRUNE: An unexpected error occurred during pruning. Error: {e}")
 
