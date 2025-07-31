@@ -29,7 +29,15 @@ async def poll_for_live_data():
         logging.info("BACKGROUND_POLL: Starting polling cycle...")
         try:
             all_matches_summary = await loop.run_in_executor(None, scraper.get_live_matches_summary)
-            itf_matches_summary = [m for m in all_matches_summary if m and "ITF" in m.get("tournament_name", "")]
+
+            # THE FIX: Make the filter stricter to only include pure ITF matches.
+            # It now checks for "ITF" and explicitly excludes "ATP".
+            itf_matches_summary = [
+                m for m in all_matches_summary if m and
+                                                  "ITF" in m.get("tournament_name", "") and
+                                                  "ATP" not in m.get("tournament_name", "")
+            ]
+
             logging.info(f"Found {len(itf_matches_summary)} live ITF matches to process.")
 
             if mongo_manager and mongo_manager.client:
@@ -43,7 +51,6 @@ async def poll_for_live_data():
 
                 raw_data = await loop.run_in_executor(None, lambda: scraper.fetch_match_data(match_id))
                 if raw_data:
-                    # FIX: Pass the match_id to the transformer function.
                     formatted_data = transform_match_data_to_client_format(raw_data, match_id)
                     new_cache_data[match_id] = formatted_data
 
