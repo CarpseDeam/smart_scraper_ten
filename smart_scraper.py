@@ -70,29 +70,30 @@ class TenipoScraper:
 
     def _scrape_html_pbp(self) -> List[Dict[str, Any]]:
         """
-        Scrapes the Point-by-Point tab from the rendered HTML, using the correct
-        parallel structure for headers and point blocks.
+        Scrapes the Point-by-Point tab from the rendered HTML. This version
+        correctly waits for the content itself, not a container.
         """
         pbp_data = []
         try:
-            # 1. Click the "PT BY PT" tab to make the data visible.
+            # 1. Click the "PT BY PT" tab.
             pbp_button = WebDriverWait(self.driver, 10).until(
                 EC.element_to_be_clickable((By.ID, "buttonhistoryall"))
             )
             self.driver.execute_script("arguments[0].click();", pbp_button)
             logging.info("Clicked 'PT BY PT' tab.")
 
-            # 2. Wait for the main container of the PBP data to appear.
-            pbp_container = WebDriverWait(self.driver, 10).until(
-                EC.presence_of_element_located((By.ID, "history"))
+            # 2. THE CORRECT WAIT: Wait for the first game header block to be present on the page.
+            #    This is more reliable than waiting for a container that might not exist.
+            WebDriverWait(self.driver, 10).until(
+                EC.presence_of_element_located((By.CLASS_NAME, "ohlavicka1"))
             )
 
-            # 3. Find the parallel lists of header blocks and point blocks.
-            game_headers = pbp_container.find_elements(By.CLASS_NAME, "ohlavicka1")
-            game_point_blocks = pbp_container.find_elements(By.CLASS_NAME, "sethistory")
+            # 3. Now that we know the content is loaded, find all headers and point blocks.
+            game_headers = self.driver.find_elements(By.CLASS_NAME, "ohlavicka1")
+            game_point_blocks = self.driver.find_elements(By.CLASS_NAME, "sethistory")
             logging.info(f"Found {len(game_headers)} game headers and {len(game_point_blocks)} point blocks.")
 
-            # 4. Zip them together and process each game as a pair.
+            # 4. Process each game by pairing a header with its corresponding point block.
             for header_element, points_block_element in zip(game_headers, game_point_blocks):
                 try:
                     header_score = header_element.find_element(By.CLASS_NAME, "ohlavicka3").text.strip()
@@ -104,14 +105,12 @@ class TenipoScraper:
                         "points_log": points_log
                     })
                 except NoSuchElementException:
-                    logging.warning("A PBP game block was malformed (missing header or points). Skipping.")
-                except Exception as e:
-                    logging.warning(f"Could not parse a specific PBP game/point pair: {e}")
+                    logging.warning("A PBP game block was malformed. Skipping.")
 
             return pbp_data
 
         except TimeoutException:
-            logging.warning("Timed out waiting for PBP HTML content. It might not be available for this match.")
+            logging.warning("Timed out waiting for PBP content to load after click. Match may not have PBP data.")
             return []
         except Exception as e:
             logging.error(f"A critical error occurred during PBP HTML scraping: {e}", exc_info=True)
@@ -119,9 +118,7 @@ class TenipoScraper:
 
     def fetch_match_data(self, match_id: str) -> Dict[str, Any]:
         """
-        HYBRID APPROACH:
-        1. Uses selenium-wire to efficiently get the main match XML data.
-        2. Uses standard selenium to scrape the rendered HTML for PBP data.
+        HYBRID APPROACH: Gets main data via XML and PBP data via direct HTML scraping.
         """
         match_page_url = f"https://tenipo.com/match/-/{match_id}"
         logging.info(f"FETCHING data for match ID: {match_id}")
