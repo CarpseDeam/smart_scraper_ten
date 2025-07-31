@@ -127,7 +127,6 @@ def transform_match_data_to_client_format(raw_data: dict) -> dict:
 
     match_info = raw_data["match"]
     pbp_info = raw_data.get("point_by_point", {})
-    match_id = _safe_get_from_dict(match_info, "id")
 
     p1_info = _parse_player_info(_safe_get_from_dict(match_info, "player1", ""),
                                  _safe_get_from_dict(match_info, "country1", ""))
@@ -135,7 +134,6 @@ def transform_match_data_to_client_format(raw_data: dict) -> dict:
                                  _safe_get_from_dict(match_info, "country2", ""))
 
     return {
-        "matchId": match_id,
         "tournament": _safe_get_from_dict(match_info, "tournament_name"),
         "round": _parse_round_info(_safe_get_from_dict(match_info, "round", "")).get("round_name"),
         "timePolled": datetime.now(timezone.utc).isoformat(),

@@ -36,22 +36,16 @@ class MongoManager:
             return
 
         try:
-            # The collection where we'll store the match documents
             matches_collection = self.db["matches"]
-
-            # The "smart" part: update_one with upsert=True
-            # We use the unique match_id as the document's _id for efficiency.
             result = matches_collection.update_one(
                 {"_id": match_id},
                 {"$set": data},
                 upsert=True
             )
-
             if result.upserted_id:
                 logging.info(f"DB: INSERTED new match with ID: {match_id}")
             elif result.modified_count > 0:
                 logging.info(f"DB: UPDATED existing match with ID: {match_id}")
-
         except OperationFailure as e:
             logging.error(f"DB: A database operation failed for match ID {match_id}. Error: {e}")
         except Exception as e:
@@ -64,29 +58,19 @@ class MongoManager:
         if not self.client:
             logging.error("Cannot prune matches: MongoDB client is not connected.")
             return
-
         try:
             matches_collection = self.db["matches"]
-
-            # Find all documents in the collection, returning only their IDs
             stored_match_ids_cursor = matches_collection.find({}, {"_id": 1})
             stored_match_ids = {doc["_id"] for doc in stored_match_ids_cursor}
-
             live_ids_set = set(live_match_ids)
-
-            # These are matches that are in the database but NOT in the latest live feed.
             ids_to_delete = list(stored_match_ids - live_ids_set)
 
             if not ids_to_delete:
                 return
 
             logging.info(f"DB_PRUNE: Found {len(ids_to_delete)} completed matches to prune: {ids_to_delete}")
-
-            # Use the $in operator to delete all matching documents in one operation.
             result = matches_collection.delete_many({"_id": {"$in": ids_to_delete}})
-
             logging.info(f"DB_PRUNE: Successfully deleted {result.deleted_count} documents.")
-
         except Exception as e:
             logging.error(f"DB_PRUNE: An unexpected error occurred during pruning. Error: {e}")
 

@@ -6,6 +6,9 @@ import config
 from seleniumwire import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.common.exceptions import WebDriverException, TimeoutException
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -71,27 +74,35 @@ class TenipoScraper:
             del self.driver.requests
             self.driver.get(match_page_url)
 
-            # Fetch both data files simultaneously
+            # Wait for and get the main match data file
             match_req = self.driver.wait_for_request(f'/xmlko/match{match_id}.xml', timeout=20)
-            pbp_req = self.driver.wait_for_request(f'/xmlko/matchl{match_id}.xml', timeout=20)
-
-            # Decode the main match data
             match_payload_str = match_req.response.body.decode('latin-1')
             match_xml_str = self.driver.execute_script("return janko(arguments[0]);", match_payload_str)
             if not match_xml_str: return {}
 
-            # Decode the point-by-point data
-            pbp_payload_str = pbp_req.response.body.decode('latin-1')
+            # --- THIS IS THE FIX ---
+            # 1. Find the "PT BY PT" tab and CLICK it.
+            pbp_tab_xpath = "//div[contains(@class, 'subNavigationButton') and text()='PT BY PT']"
+            wait = WebDriverWait(self.driver, 10)
+            pbp_tab_element = wait.until(EC.element_to_be_clickable((By.XPATH, pbp_tab_xpath)))
+            pbp_tab_element.click()
+
+            # 2. Now wait for the point-by-point data file that is loaded AFTER the click.
+            pbp_req = self.driver.wait_for_request(f'/xmlko/matchl{match_id}.xml', timeout=20)
+
+            # 3. Decode it safely.
             pbp_xml_str = ""
-            # THIS IS THE FIX: Only try to decode if the payload looks valid.
-            if pbp_req.response and pbp_req.response.body and '<l>' in pbp_payload_str:
-                pbp_xml_str = self.driver.execute_script("return janko(arguments[0]);", pbp_payload_str)
+            if pbp_req and pbp_req.response and pbp_req.response.body:
+                pbp_payload_str = pbp_req.response.body.decode('latin-1')
+                if '<l>' in pbp_payload_str:
+                    pbp_xml_str = self.driver.execute_script("return janko(arguments[0]);", pbp_payload_str)
+
+            # --- END OF FIX ---
 
             parser = ET.XMLParser(recover=True, encoding='utf-8')
             match_root = ET.fromstring(match_xml_str.encode('utf-8'), parser=parser)
             pbp_root = ET.fromstring(pbp_xml_str.encode('utf-8'), parser=parser) if pbp_xml_str else None
 
-            # Combine the data
             combined_data = self._xml_to_dict(match_root)
             if pbp_root is not None:
                 combined_data['point_by_point'] = self._xml_to_dict(pbp_root)
