@@ -35,8 +35,6 @@ def _parse_point_by_point(pbp_html_data: list) -> list:
 
     client_pbp_data = []
     for game_block in pbp_html_data:
-        # The scraped data has 'game_header' and 'points_log'. We'll map this
-        # to a client-friendly format. This is simpler and more robust.
         client_pbp_data.append({
             "game": game_block.get("game_header", ""),
             "point_progression_log": game_block.get("points_log", [])
@@ -114,13 +112,13 @@ def _parse_stats_string(stats_str: str) -> list:
     ]
 
 
-def transform_match_data_to_client_format(raw_data: dict) -> dict:
+# FIX: Added 'match_id' as an argument to the function.
+def transform_match_data_to_client_format(raw_data: dict, match_id: str) -> dict:
     if "match" not in raw_data:
         logging.warning("transform_match_data called with invalid data format.")
         return {}
 
     match_info = raw_data["match"]
-    # PBP info now comes from our new HTML scraping method.
     pbp_info = raw_data.get("point_by_point_html", [])
 
     p1_info = _parse_player_info(_safe_get_from_dict(match_info, "player1", ""),
@@ -129,6 +127,8 @@ def transform_match_data_to_client_format(raw_data: dict) -> dict:
                                  _safe_get_from_dict(match_info, "country2", ""))
 
     return {
+        # FIX: Added the match_url field to satisfy the database's unique index.
+        "match_url": f"https://tenipo.com/match/-/{match_id}",
         "tournament": _safe_get_from_dict(match_info, "tournament_name"),
         "round": _parse_round_info(_safe_get_from_dict(match_info, "round", "")).get("round_name"),
         "timePolled": datetime.now(timezone.utc).isoformat(),

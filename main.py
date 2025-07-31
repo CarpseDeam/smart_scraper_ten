@@ -43,7 +43,8 @@ async def poll_for_live_data():
 
                 raw_data = await loop.run_in_executor(None, lambda: scraper.fetch_match_data(match_id))
                 if raw_data:
-                    formatted_data = transform_match_data_to_client_format(raw_data)
+                    # FIX: Pass the match_id to the transformer function.
+                    formatted_data = transform_match_data_to_client_format(raw_data, match_id)
                     new_cache_data[match_id] = formatted_data
 
                     if mongo_manager and mongo_manager.client:
