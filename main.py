@@ -13,7 +13,8 @@ from database import MongoManager
 app_container = {}
 app_settings = config.Settings()
 live_data_cache = {"data": {}, "last_updated": None}
-CACHE_REFRESH_INTERVAL_SECONDS = 30
+# FIX: Reduced the wait time for more frequent updates.
+CACHE_REFRESH_INTERVAL_SECONDS = 15
 
 
 async def poll_for_live_data():
@@ -30,8 +31,6 @@ async def poll_for_live_data():
         try:
             all_matches_summary = await loop.run_in_executor(None, scraper.get_live_matches_summary)
 
-            # THE FIX: Make the filter stricter to only include pure ITF matches.
-            # It now checks for "ITF" and explicitly excludes "ATP".
             itf_matches_summary = [
                 m for m in all_matches_summary if m and
                                                   "ITF" in m.get("tournament_name", "") and
@@ -39,24 +38,39 @@ async def poll_for_live_data():
             ]
 
             logging.info(f"Found {len(itf_matches_summary)} live ITF matches to process.")
+            live_match_ids = [m['id'] for m in itf_matches_summary if m and 'id' in m]
 
             if mongo_manager and mongo_manager.client:
-                live_match_ids = [m['id'] for m in itf_matches_summary if m and 'id' in m]
                 await loop.run_in_executor(None, lambda: mongo_manager.prune_completed_matches(live_match_ids))
 
-            new_cache_data = {}
-            for match_summary in itf_matches_summary:
-                match_id = match_summary.get("id")
-                if not match_id: continue
+            # --- FIX: Process all matches concurrently instead of sequentially ---
+            async def process_match(match_id: str):
+                """Helper coroutine to fetch, format, and save data for one match."""
+                try:
+                    raw_data = await loop.run_in_executor(None, lambda: scraper.fetch_match_data(match_id))
+                    if not raw_data:
+                        return None  # Skip if fetching failed
 
-                raw_data = await loop.run_in_executor(None, lambda: scraper.fetch_match_data(match_id))
-                if raw_data:
                     formatted_data = transform_match_data_to_client_format(raw_data, match_id)
-                    new_cache_data[match_id] = formatted_data
 
                     if mongo_manager and mongo_manager.client:
                         await loop.run_in_executor(None,
                                                    lambda: mongo_manager.save_match_data(match_id, formatted_data))
+
+                    return match_id, formatted_data
+                except Exception as e:
+                    logging.error(f"Failed to process match ID {match_id} in parallel: {e}")
+                    return None  # Return None on error to avoid crashing the batch
+
+            # Create a list of tasks, one for each match
+            tasks = [process_match(mid) for mid in live_match_ids]
+
+            # Run all tasks concurrently and wait for them to complete
+            results = await asyncio.gather(*tasks)
+
+            # Build the new cache from the results of the concurrent tasks
+            new_cache_data = {match_id: data for match_id, data in results if match_id and data}
+            # --- End of concurrency fix ---
 
             live_data_cache["data"] = new_cache_data
             live_data_cache["last_updated"] = datetime.now(timezone.utc)
