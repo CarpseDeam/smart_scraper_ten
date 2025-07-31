@@ -29,28 +29,25 @@ def _to_int_score(value):
 
 
 def _parse_point_by_point(pbp_data: dict) -> list:
-    """Parses the new point-by-point data structure."""
-    if not pbp_data or 'point' not in pbp_data:
+    """Parses the real point-by-point data structure from the pbp file."""
+    if not pbp_data:
         return []
 
-    points = pbp_data['point']
-    if not isinstance(points, list):
-        points = [points]  # Ensure it's a list even if there's only one point
+    # The PBP data can be wrapped in <match> or <event>, so we check for both.
+    container = pbp_data.get('match') or pbp_data.get('event') or pbp_data
+    points = container.get('p')
 
-    formatted_points = []
-    for point in points:
-        # Assuming the format is something like "set,game,point,player"
-        # Example: 1,1,15:0,1 -> Set 1, Game 1, Score 15:0, Player 1 served
-        parts = _safe_get_from_dict(point, '#text', '').split(',')
-        if len(parts) < 4: continue
+    if not points: return []
+    if not isinstance(points, list): points = [points] # Handle single point case
 
-        formatted_points.append({
-            "set": _safe_get_from_list(parts, 0),
-            "game": _safe_get_from_list(parts, 1),
-            "score": _safe_get_from_list(parts, 2),
-            "servingPlayer": _safe_get_from_list(parts, 3),
-        })
-    return formatted_points
+    return [
+        {
+            "set": _safe_get_from_dict(point, 'a'),
+            "game": _safe_get_from_dict(point, 'b'),
+            "score": _safe_get_from_dict(point, 'c'),
+            "servingPlayer": _safe_get_from_dict(point, 'd'),
+        } for point in points if point
+    ]
 
 
 def _parse_player_info(player_str, country_str):
@@ -113,7 +110,7 @@ def _parse_stats_string(stats_str: str) -> list:
         else:
             p1_val, p2_val = _safe_get_from_list(p1_vals, i, "0"), _safe_get_from_list(p2_vals, i, "0")
         stat_item = {"name": stat_name, "home": p1_val, "away": p2_val}
-        if "Serve" in stat_name or "Aces" in stat_name or "Double" in stat_name:
+        if "Serve" in stat_name or "Aces" in stat_name or "Double" in stat_name or "Games Played" in stat_name:
             service_stats.append(stat_item)
         else:
             return_stats.append(stat_item)
@@ -130,6 +127,7 @@ def transform_match_data_to_client_format(raw_data: dict) -> dict:
 
     match_info = raw_data["match"]
     pbp_info = raw_data.get("point_by_point", {})
+    match_id = _safe_get_from_dict(match_info, "id")
 
     p1_info = _parse_player_info(_safe_get_from_dict(match_info, "player1", ""),
                                  _safe_get_from_dict(match_info, "country1", ""))
@@ -137,6 +135,7 @@ def transform_match_data_to_client_format(raw_data: dict) -> dict:
                                  _safe_get_from_dict(match_info, "country2", ""))
 
     return {
+        "matchId": match_id,
         "tournament": _safe_get_from_dict(match_info, "tournament_name"),
         "round": _parse_round_info(_safe_get_from_dict(match_info, "round", "")).get("round_name"),
         "timePolled": datetime.now(timezone.utc).isoformat(),
