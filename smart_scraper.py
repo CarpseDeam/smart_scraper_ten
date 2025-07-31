@@ -70,47 +70,92 @@ class TenipoScraper:
 
     def fetch_match_data(self, match_id: str) -> Dict[str, Any]:
         match_page_url = f"https://tenipo.com/match/-/{match_id}"
+
         try:
+            # === STAGE 1: Navigate and get main match data ===
             del self.driver.requests
             self.driver.get(match_page_url)
 
-            # Wait for and get the main match data file
+            # Wait for the main match data file and decode it
             match_req = self.driver.wait_for_request(f'/xmlko/match{match_id}.xml', timeout=20)
-            match_payload_str = match_req.response.body.decode('latin-1')
-            match_xml_str = self.driver.execute_script("return janko(arguments[0]);", match_payload_str)
-            if not match_xml_str: return {}
 
-            # --- THIS IS THE FIX ---
-            # 1. Find the "PT BY PT" tab and CLICK it.
-            pbp_tab_xpath = "//div[contains(@class, 'subNavigationButton') and text()='PT BY PT']"
-            wait = WebDriverWait(self.driver, 10)
-            pbp_tab_element = wait.until(EC.element_to_be_clickable((By.XPATH, pbp_tab_xpath)))
-            pbp_tab_element.click()
+            match_xml_str = ""
+            if match_req and match_req.response and match_req.response.body:
+                match_payload_str = match_req.response.body.decode('latin-1')
+                try:
+                    match_xml_str = self.driver.execute_script("return janko(arguments[0]);", match_payload_str)
+                except WebDriverException as e:
+                    logging.error(
+                        f"Could not decode main match data for {match_id}, aborting fetch for this match. Error: {e}")
+                    return {}  # If main data fails, we can't proceed.
 
-            # 2. Now wait for the point-by-point data file that is loaded AFTER the click.
-            pbp_req = self.driver.wait_for_request(f'/xmlko/matchl{match_id}.xml', timeout=20)
+            if not match_xml_str:
+                logging.warning(f"Main match data for {match_id} was empty after decoding. Aborting.")
+                return {}
 
-            # 3. Decode it safely.
+            # === STAGE 2: Get Point-by-Point data (PBP) ===
             pbp_xml_str = ""
-            if pbp_req and pbp_req.response and pbp_req.response.body:
-                pbp_payload_str = pbp_req.response.body.decode('latin-1')
-                if '<l>' in pbp_payload_str:
-                    pbp_xml_str = self.driver.execute_script("return janko(arguments[0]);", pbp_payload_str)
+            try:
+                # Clear any requests that loaded with the page, before we click for PBP data
+                del self.driver.requests
 
-            # --- END OF FIX ---
+                # Find the "PT BY PT" tab and click it to trigger the data load
+                pbp_tab_xpath = "//div[contains(@class, 'subNavigationButton') and text()='PT BY PT']"
+                wait = WebDriverWait(self.driver, 10)
+                pbp_tab_element = wait.until(EC.element_to_be_clickable((By.XPATH, pbp_tab_xpath)))
+                # A JS click can be more reliable than Selenium's native click.
+                self.driver.execute_script("arguments[0].click();", pbp_tab_element)
 
+                # Now, wait for the PBP data file that is loaded *after* the click
+                pbp_req = self.driver.wait_for_request(f'/xmlko/matchl{match_id}.xml', timeout=20)
+
+                if pbp_req and pbp_req.response and pbp_req.response.body:
+                    pbp_payload_str = pbp_req.response.body.decode('latin-1')
+                    # The 'atob' error happens here. We wrap this critical part in its own try/except.
+                    try:
+                        pbp_xml_str = self.driver.execute_script("return janko(arguments[0]);", pbp_payload_str)
+                    except WebDriverException as e:
+                        # This is the specific error you were seeing. We'll log it as a warning and move on.
+                        logging.warning(f"Failed to decode PBP payload for {match_id}. It might be invalid. Error: {e}")
+                        pbp_xml_str = ""  # Ensure it's empty on failure, so we can proceed without PBP data.
+
+            except TimeoutException:
+                logging.info(
+                    f"PBP_FETCH: Timed out waiting for PBP data for match {match_id}. It may not be available.")
+                # It's okay to not have PBP data, we can continue without it.
+                pass
+            except Exception as e:
+                logging.warning(f"PBP_FETCH: An unexpected error occurred while fetching PBP data for {match_id}: {e}")
+                # Also okay to continue without it.
+                pass
+
+            # === STAGE 3: Combine and return data ===
             parser = ET.XMLParser(recover=True, encoding='utf-8')
             match_root = ET.fromstring(match_xml_str.encode('utf-8'), parser=parser)
-            pbp_root = ET.fromstring(pbp_xml_str.encode('utf-8'), parser=parser) if pbp_xml_str else None
+
+            pbp_root = None
+            if pbp_xml_str:
+                try:
+                    pbp_root = ET.fromstring(pbp_xml_str.encode('utf-8'), parser=parser)
+                except ET.XMLSyntaxError:
+                    logging.warning(f"PBP data for {match_id} was not valid XML after decoding. Skipping PBP.")
 
             combined_data = self._xml_to_dict(match_root)
             if pbp_root is not None:
                 combined_data['point_by_point'] = self._xml_to_dict(pbp_root)
+            else:
+                # Ensure the key exists for the data_mapper, even if empty.
+                combined_data['point_by_point'] = {}
 
             return combined_data
 
+        except TimeoutException:
+            logging.error(
+                f"CRITICAL_FETCH_FAIL: Timed out waiting for MAIN match data for ID {match_id}. The site might be slow or the URL pattern is wrong.")
+            return {}
         except Exception as e:
-            logging.error(f"Error in fetch_match_data for ID {match_id}: {e}", exc_info=True)
+            logging.error(f"CRITICAL_FETCH_FAIL: A fatal error occurred in fetch_match_data for ID {match_id}: {e}",
+                          exc_info=True)
             return {}
 
     def close(self):
