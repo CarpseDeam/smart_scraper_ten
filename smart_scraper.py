@@ -82,7 +82,10 @@ class TenipoScraper:
 
             # Decode the point-by-point data
             pbp_payload_str = pbp_req.response.body.decode('latin-1')
-            pbp_xml_str = self.driver.execute_script("return janko(arguments[0]);", pbp_payload_str)
+            pbp_xml_str = ""
+            # THIS IS THE FIX: Only try to decode if the payload looks valid.
+            if pbp_req.response and pbp_req.response.body and '<l>' in pbp_payload_str:
+                pbp_xml_str = self.driver.execute_script("return janko(arguments[0]);", pbp_payload_str)
 
             parser = ET.XMLParser(recover=True, encoding='utf-8')
             match_root = ET.fromstring(match_xml_str.encode('utf-8'), parser=parser)
