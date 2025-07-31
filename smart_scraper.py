@@ -5,7 +5,7 @@ from typing import List, Dict, Any
 import config
 from seleniumwire import webdriver
 from selenium.webdriver.chrome.options import Options
-from selenium.common.exceptions import WebDriverException, TimeoutException
+from selenium.common.exceptions import WebDriverException, TimeoutException, NoSuchElementException
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
@@ -69,37 +69,44 @@ class TenipoScraper:
             return []
 
     def _scrape_html_pbp(self) -> List[Dict[str, Any]]:
-        """Scrapes the rendered HTML of the Point-by-Point tab."""
+        """
+        Scrapes the Point-by-Point tab from the rendered HTML, using the correct
+        parallel structure for headers and point blocks.
+        """
         pbp_data = []
         try:
-            # 1. Click the "PT BY PT" tab using its reliable ID.
+            # 1. Click the "PT BY PT" tab to make the data visible.
             pbp_button = WebDriverWait(self.driver, 10).until(
                 EC.element_to_be_clickable((By.ID, "buttonhistoryall"))
             )
             self.driver.execute_script("arguments[0].click();", pbp_button)
-            logging.info("Clicked 'PT BY PT' tab to load HTML content.")
+            logging.info("Clicked 'PT BY PT' tab.")
 
-            # 2. Wait for the content to be loaded. 'sethistory' is the container class.
-            WebDriverWait(self.driver, 10).until(
-                EC.presence_of_element_located((By.CLASS_NAME, "sethistory"))
+            # 2. Wait for the main container of the PBP data to appear.
+            pbp_container = WebDriverWait(self.driver, 10).until(
+                EC.presence_of_element_located((By.ID, "history"))
             )
 
-            # 3. Scrape the data from the rendered HTML.
-            game_blocks = self.driver.find_elements(By.CLASS_NAME, "sethistory")
-            logging.info(f"Found {len(game_blocks)} PBP game blocks in HTML.")
+            # 3. Find the parallel lists of header blocks and point blocks.
+            game_headers = pbp_container.find_elements(By.CLASS_NAME, "ohlavicka1")
+            game_point_blocks = pbp_container.find_elements(By.CLASS_NAME, "sethistory")
+            logging.info(f"Found {len(game_headers)} game headers and {len(game_point_blocks)} point blocks.")
 
-            for block in game_blocks:
+            # 4. Zip them together and process each game as a pair.
+            for header_element, points_block_element in zip(game_headers, game_point_blocks):
                 try:
-                    header = block.find_element(By.CLASS_NAME, "ohlavicka3").text.strip()
-                    points = [p.text.strip().replace('\n', ' ') for p in
-                              block.find_elements(By.CLASS_NAME, "pointlogg")]
+                    header_score = header_element.find_element(By.CLASS_NAME, "ohlavicka3").text.strip()
+                    points_log = [p.text.strip().replace('\n', ' ') for p in
+                                  points_block_element.find_elements(By.CLASS_NAME, "pointlogg")]
 
                     pbp_data.append({
-                        "game_header": header,
-                        "points_log": points
+                        "game_header": header_score,
+                        "points_log": points_log
                     })
+                except NoSuchElementException:
+                    logging.warning("A PBP game block was malformed (missing header or points). Skipping.")
                 except Exception as e:
-                    logging.warning(f"Could not parse a PBP game block: {e}")
+                    logging.warning(f"Could not parse a specific PBP game/point pair: {e}")
 
             return pbp_data
 
@@ -107,7 +114,7 @@ class TenipoScraper:
             logging.warning("Timed out waiting for PBP HTML content. It might not be available for this match.")
             return []
         except Exception as e:
-            logging.error(f"An error occurred during PBP HTML scraping: {e}", exc_info=True)
+            logging.error(f"A critical error occurred during PBP HTML scraping: {e}", exc_info=True)
             return []
 
     def fetch_match_data(self, match_id: str) -> Dict[str, Any]:
@@ -139,6 +146,11 @@ class TenipoScraper:
 
             # --- STAGE 2: Scrape PBP data from rendered HTML ---
             pbp_html_data = self._scrape_html_pbp()
+            if pbp_html_data:
+                logging.info(f"Successfully scraped {len(pbp_html_data)} PBP blocks from HTML for match {match_id}.")
+            else:
+                logging.warning(f"No PBP data was scraped from HTML for match {match_id}.")
+
             combined_data['point_by_point_html'] = pbp_html_data
 
             return combined_data
