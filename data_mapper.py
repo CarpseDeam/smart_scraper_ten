@@ -28,26 +28,20 @@ def _to_int_score(value):
         return 0
 
 
-def _parse_point_by_point(pbp_data: dict) -> list:
-    """Parses the real point-by-point data structure from the pbp file."""
-    if not pbp_data:
+def _parse_point_by_point(pbp_html_data: list) -> list:
+    """Parses the point-by-point data that was scraped from the page's HTML."""
+    if not pbp_html_data:
         return []
 
-    # The PBP data can be wrapped in <match> or <event>, so we check for both.
-    container = pbp_data.get('match') or pbp_data.get('event') or pbp_data
-    points = container.get('p')
-
-    if not points: return []
-    if not isinstance(points, list): points = [points] # Handle single point case
-
-    return [
-        {
-            "set": _safe_get_from_dict(point, 'a'),
-            "game": _safe_get_from_dict(point, 'b'),
-            "score": _safe_get_from_dict(point, 'c'),
-            "servingPlayer": _safe_get_from_dict(point, 'd'),
-        } for point in points if point
-    ]
+    client_pbp_data = []
+    for game_block in pbp_html_data:
+        # The scraped data has 'game_header' and 'points_log'. We'll map this
+        # to a client-friendly format. This is simpler and more robust.
+        client_pbp_data.append({
+            "game": game_block.get("game_header", ""),
+            "point_progression_log": game_block.get("points_log", [])
+        })
+    return client_pbp_data
 
 
 def _parse_player_info(player_str, country_str):
@@ -126,7 +120,8 @@ def transform_match_data_to_client_format(raw_data: dict) -> dict:
         return {}
 
     match_info = raw_data["match"]
-    pbp_info = raw_data.get("point_by_point", {})
+    # PBP info now comes from our new HTML scraping method.
+    pbp_info = raw_data.get("point_by_point_html", [])
 
     p1_info = _parse_player_info(_safe_get_from_dict(match_info, "player1", ""),
                                  _safe_get_from_dict(match_info, "country1", ""))
