@@ -16,6 +16,12 @@ class Settings(BaseSettings):
     )
     USER_AGENT: str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
+    # --- Polling Settings ---
+    CACHE_REFRESH_INTERVAL_SECONDS: int = Field(
+        default=15,
+        description="The interval in seconds between each poll for live match data."
+    )
+
     # --- Database Settings ---
     MONGO_URI: str = Field(
         default="mongodb://localhost:27017",
