@@ -1,3 +1,4 @@
+# background_service.py
 import logging
 import asyncio
 from datetime import datetime, timezone
@@ -32,7 +33,6 @@ class ScrapingService:
             self.scraper = await loop.run_in_executor(None, lambda: TenipoScraper(self.settings))
         except Exception as e:
             logging.critical(f"FATAL: Scraper initialization failed. Service will not poll. Error: {e}")
-            # Do not proceed if the scraper fails
             return
 
         self.mongo_manager = MongoManager(self.settings)
@@ -48,6 +48,10 @@ class ScrapingService:
         logging.info("ScrapingService shutting down...")
         if self.polling_task:
             self.polling_task.cancel()
+            try:
+                await self.polling_task
+            except asyncio.CancelledError:
+                logging.info("Polling task successfully cancelled.")
         if self.scraper:
             await asyncio.get_event_loop().run_in_executor(None, self.scraper.close)
         if self.mongo_manager:
@@ -60,6 +64,11 @@ class ScrapingService:
         while True:
             logging.info("BACKGROUND_POLL: Starting polling cycle...")
             try:
+                if not self.scraper:
+                    logging.error("Scraper is not available, skipping polling cycle.")
+                    await asyncio.sleep(self.settings.CACHE_REFRESH_INTERVAL_SECONDS)
+                    continue
+
                 all_matches_summary = await loop.run_in_executor(None, self.scraper.get_live_matches_summary)
 
                 itf_matches_summary = [
@@ -105,4 +114,4 @@ class ScrapingService:
             except Exception as e:
                 logging.error(f"BACKGROUND_POLL: Unhandled error during polling cycle: {e}", exc_info=True)
 
-            await asyncio.sleep(self.settings.STALL_MONITOR_SECONDS)
+            await asyncio.sleep(self.settings.CACHE_REFRESH_INTERVAL_SECONDS)

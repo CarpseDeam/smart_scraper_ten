@@ -1,3 +1,4 @@
+# main.py
 import logging
 import asyncio
 from contextlib import asynccontextmanager
@@ -26,7 +27,6 @@ async def lifespan(app: FastAPI):
 
     logging.info("Application shutdown: Stopping background service...")
     await scraping_service.stop()
-    logging.info("Shutdown cleanup complete.")
 
 
 app = FastAPI(title="Live Tennis Score API", lifespan=lifespan)
@@ -41,7 +41,7 @@ async def get_all_live_itf_data():
     if not last_updated or not cache["data"]:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Cache is empty. Please try again."
+            detail="Cache is currently empty. Please try again in a moment."
         )
 
     age_seconds = (datetime.now(timezone.utc) - last_updated).total_seconds()
@@ -62,7 +62,7 @@ async def get_match_data(match_id: str):
     if not match_data:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Match ID '{match_id}' not found."
+            detail=f"Data for match ID '{match_id}' not found in the live cache."
         )
 
     return match_data

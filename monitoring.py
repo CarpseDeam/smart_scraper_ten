@@ -65,6 +65,7 @@ class StallMonitor:
             game_str = f"{current_game.get('p1', '-')}{current_game.get('p2', '-')}"
             return f"{sets_str}_{game_str}"
         except Exception:
+            # If data structure is unexpected, return a unique hash to force an update
             return str(datetime.now(timezone.utc).timestamp())
 
     def _format_alert_message(self, match_data: dict) -> str:
@@ -93,18 +94,22 @@ class StallMonitor:
             return "🚨 **Match Stall Alert** 🚨\n\nCould not format all match details due to unexpected data."
 
     async def check_and_update_all(self, all_current_matches: Dict[str, Dict]):
-        """Processes all current matches, detects stalls, sends alerts, and prunes old data."""
+        """
+        Processes all current matches, detects stalls, sends alerts, and prunes old data.
+        """
         now = datetime.now(timezone.utc)
         live_match_ids = set(all_current_matches.keys())
         alert_tasks = []
 
         for match_id, match_data in all_current_matches.items():
+            # Only monitor matches that are currently LIVE
             if match_data.get("score", {}).get("status") != "LIVE":
                 continue
 
             current_score_hash = self._create_score_hash(match_data)
 
             if match_id not in self._match_states:
+                # New live match, start tracking it
                 self._match_states[match_id] = {
                     "score_hash": current_score_hash,
                     "last_updated": now,
@@ -113,20 +118,28 @@ class StallMonitor:
                 logging.info(f"STALL_MONITOR: Now tracking new match ID: {match_id}")
                 continue
 
+            # Existing match, check for changes
             previous_state = self._match_states[match_id]
             if previous_state["score_hash"] != current_score_hash:
+                # Score has changed, update state
                 previous_state["score_hash"] = current_score_hash
                 previous_state["last_updated"] = now
-                previous_state["alert_sent"] = False
+                previous_state["alert_sent"] = False  # Reset alert status
                 logging.debug(f"STALL_MONITOR: Score updated for match ID: {match_id}")
             else:
+                # Score is the same, check for stall
                 time_since_last_update = now - previous_state["last_updated"]
                 if time_since_last_update > self.stall_duration and not previous_state["alert_sent"]:
                     logging.warning(f"STALL_MONITOR: STALL DETECTED for match ID: {match_id}")
+
+                    # Create and queue the alert task
                     message = self._format_alert_message(match_data)
                     alert_tasks.append(self.notifier.send_alert(message))
+
+                    # Mark as sent to prevent spamming
                     previous_state["alert_sent"] = True
 
+        # --- Prune old matches from tracker ---
         tracked_ids = set(self._match_states.keys())
         ids_to_prune = tracked_ids - live_match_ids
         if ids_to_prune:
@@ -134,6 +147,7 @@ class StallMonitor:
                 del self._match_states[match_id]
             logging.info(f"STALL_MONITOR: Pruned {len(ids_to_prune)} completed/old matches from tracking.")
 
+        # --- Send all alerts concurrently ---
         if alert_tasks:
             logging.info(f"STALL_MONITOR: Sending {len(alert_tasks)} stall alerts...")
             await asyncio.gather(*alert_tasks)
