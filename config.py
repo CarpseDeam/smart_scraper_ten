@@ -26,4 +26,16 @@ class Settings(BaseSettings):
         description="The name of the database to use within MongoDB."
     )
 
+    # --- Monitoring Settings (MUST be set in environment) ---
+    TELEGRAM_BOT_TOKEN: str = Field(
+        description="The secret token for the Telegram bot. MUST be set as an environment variable."
+    )
+    TELEGRAM_CHAT_ID: str = Field(
+        description="The chat ID for Telegram alerts. MUST be set as an environment variable."
+    )
+    STALL_MONITOR_SECONDS: int = Field(
+        default=300,
+        description="Duration in seconds after which a match with no score change is considered stalled."
+    )
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
