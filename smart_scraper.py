@@ -160,3 +160,27 @@ class TenipoScraper:
     def close(self):
         if self.driver:
             self.driver.quit()
+
+    def investigate_data_sources(self, match_id: str) -> List[str]:
+        """
+        Placeholder method for the /investigate endpoint.
+        Navigates to a match page and logs all intercepted request URLs.
+        """
+        logging.info(f"INVESTIGATING data sources for match ID: {match_id}")
+        match_page_url = f"https://tenipo.com/match/-/{match_id}"
+        try:
+            del self.driver.requests
+            self.driver.get(match_page_url)
+            # Give page time to make various background requests
+            WebDriverWait(self.driver, 20).until(
+                lambda d: len(d.requests) > 3  # Wait until a few requests are captured
+            )
+
+            captured_urls = [req.url for req in self.driver.requests]
+            logging.info(f"Captured {len(captured_urls)} requests for match {match_id}:")
+            for url in captured_urls:
+                logging.info(f"  - {url}")
+            return captured_urls
+        except Exception as e:
+            logging.error(f"An error occurred during investigation for match ID {match_id}: {e}")
+            return []

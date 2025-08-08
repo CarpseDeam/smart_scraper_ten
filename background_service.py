@@ -1,4 +1,3 @@
-# background_service.py
 import logging
 import asyncio
 from datetime import datetime, timezone
@@ -83,26 +82,25 @@ class ScrapingService:
                 if self.mongo_manager and self.mongo_manager.client:
                     await loop.run_in_executor(None, lambda: self.mongo_manager.prune_completed_matches(live_match_ids))
 
-                async def process_match(match_id: str):
+                # --- CORRECTED: Process matches sequentially to avoid race conditions ---
+                new_cache_data = {}
+                for match_id in live_match_ids:
                     try:
                         raw_data = await loop.run_in_executor(None, lambda: self.scraper.fetch_match_data(match_id))
-                        if not raw_data: return None
+                        if not raw_data:
+                            continue  # Skip if fetching failed
 
                         formatted_data = transform_match_data_to_client_format(raw_data, match_id)
 
                         if self.mongo_manager and self.mongo_manager.client:
-                            await loop.run_in_executor(None, lambda: self.mongo_manager.save_match_data(match_id,
-                                                                                                        formatted_data))
+                            await loop.run_in_executor(None,
+                                                       lambda: self.mongo_manager.save_match_data(match_id,
+                                                                                                  formatted_data))
 
-                        return match_id, formatted_data
+                        new_cache_data[match_id] = formatted_data
                     except Exception as e:
-                        logging.error(f"Failed to process match ID {match_id} in parallel: {e}")
-                        return None
-
-                tasks = [process_match(mid) for mid in live_match_ids]
-                results = await asyncio.gather(*tasks)
-
-                new_cache_data = {match_id: data for match_id, data in results if match_id and data}
+                        logging.error(f"Failed to process match ID {match_id} sequentially: {e}", exc_info=True)
+                # --- End of sequential processing fix ---
 
                 self.live_data_cache["data"] = new_cache_data
                 self.live_data_cache["last_updated"] = datetime.now(timezone.utc)
