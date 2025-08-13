@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     )
     CONCURRENT_SCRAPER_LIMIT: int = Field(
         default=3,
-        description="The maximum number of scrapers to run at the same time. Tuned for a Railway Pro plan."
+        description="The maximum number of scrapers to run at the same time. Tuned for stability."
     )
 
     # --- Database Settings ---

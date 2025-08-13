@@ -31,19 +31,23 @@ class TenipoScraper:
 
     def _setup_driver(self) -> webdriver.Chrome:
         chrome_options = Options()
-        # --- CRITICAL FIX: Give each browser its own data directory ---
         self.profile_path = os.path.join("/tmp", f"selenium-profile-{uuid.uuid4()}")
         chrome_options.add_argument(f"--user-data-dir={self.profile_path}")
 
-        # Standard arguments for running in a container
         chrome_options.add_argument("--headless=new")
         chrome_options.add_argument("--no-sandbox")
         chrome_options.add_argument("--disable-dev-shm-usage")
         chrome_options.add_argument("--disable-gpu")
-        chrome_options.add_argument("--remote-debugging-port=0")  # Assign a dynamic port
+        chrome_options.add_argument("--remote-debugging-port=0")
         chrome_options.add_argument(f"user-agent={self.settings.USER_AGENT}")
 
-        seleniumwire_options = {'disable_encoding': True}
+        # --- CRITICAL FIX: Scope selenium-wire to only capture tenipo.com requests ---
+        # This reduces overhead and cleans the logs immensely.
+        seleniumwire_options = {
+            'disable_encoding': True,
+            'scope': r'.*tenipo\.com.*'
+        }
+
         try:
             driver = webdriver.Chrome(options=chrome_options, seleniumwire_options=seleniumwire_options)
             driver.set_page_load_timeout(30)
