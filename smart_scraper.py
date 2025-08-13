@@ -3,6 +3,7 @@ import os
 import shutil
 import uuid
 import json
+import time
 from lxml import etree as ET
 from typing import List, Dict, Any
 
@@ -61,41 +62,65 @@ class TenipoScraper:
             except OSError as e:
                 logging.error(f"Error cleaning up profile {self.profile_path}: {e}")
 
-    def _get_decoded_xml_from_request_url(self, url_pattern: str) -> str | None:
-        # This is the original, flawed data-finding logic that we are reverting to
-        # because it was at least finding *some* data before the crashes.
-        # It is not perfect, but it is what was running during the successful logs.
-        try:
-            logs = self.driver.get_log('performance')
-            for log_entry in logs:
-                try:
-                    message = json.loads(log_entry.get('message', '{}')).get('message', {})
-                    if 'Network.responseReceived' in message.get('method', ''):
+    def _get_decoded_xml_from_request_url(self, url_pattern: str, timeout: int = 15) -> str | None:
+        """
+        Polls the performance logs until a request containing the URL pattern is found.
+        This is more robust than a single check, which can fail due to race conditions.
+        """
+        end_time = time.monotonic() + timeout
+        request_id = None
+
+        while time.monotonic() < end_time:
+            try:
+                logs = self.driver.get_log('performance')
+                for log_entry in logs:
+                    try:
+                        message = json.loads(log_entry.get('message', '{}')).get('message', {})
+                        if 'Network.responseReceived' not in message.get('method', ''):
+                            continue
+
                         params = message.get('params', {})
                         url = params.get('response', {}).get('url', '')
+
                         if url_pattern in url:
                             request_id = params.get('requestId')
                             if request_id:
-                                body_data = self.driver.execute_cdp_cmd('Network.getResponseBody',
-                                                                        {'requestId': request_id})
-                                payload_str = body_data.get('body', '')
-                                if payload_str:
-                                    return self.driver.execute_script("return janko(arguments[0]);", payload_str)
-                except Exception:
-                    continue
+                                logging.info(f"Found request for '{url_pattern}' with ID: {request_id}")
+                                break  # Exit inner loop
+                    except (json.JSONDecodeError, AttributeError):
+                        continue  # Ignore malformed log entries
+
+                if request_id:
+                    break  # Exit outer loop
+            except WebDriverException as e:
+                logging.warning(f"Error accessing performance logs, will retry: {e}")
+
+            time.sleep(0.5)  # Wait before polling again
+
+        if not request_id:
+            logging.error(f"TIMEOUT: Did not find network request containing '{url_pattern}' after {timeout} seconds.")
+            return None
+
+        try:
+            body_data = self.driver.execute_cdp_cmd('Network.getResponseBody', {'requestId': request_id})
+            payload_str = body_data.get('body', '')
+            if payload_str:
+                return self.driver.execute_script("return janko(arguments[0]);", payload_str)
+            else:
+                logging.warning(f"Request {request_id} for '{url_pattern}' had an empty body.")
+                return None
         except Exception as e:
-            logging.error(f"Could not get decoded XML for pattern '{url_pattern}': {e}")
-        return None
+            logging.error(f"Failed to get/decode response body for request {request_id}: {e}", exc_info=True)
+            return None
 
     def get_live_matches_summary(self) -> List[Dict[str, Any]]:
         if self.driver is None: return []
         try:
             self.driver.get(str(self.settings.LIVESCORE_PAGE_URL))
-            # The original logic did not have an explicit wait here.
-            # We are reverting to that to match the working logs.
-            decoded_xml_string = self._get_decoded_xml_from_request_url("change2.xml")
+            # Wait up to 20 seconds for the main summary file, which can be slow.
+            decoded_xml_string = self._get_decoded_xml_from_request_url("change2.xml", timeout=20)
             if not decoded_xml_string:
-                logging.warning("Could not find change2.xml in network traffic.")
+                logging.warning("Could not find change2.xml in network traffic after waiting.")
                 return []
 
             parser = ET.XMLParser(recover=True, encoding='utf-8')
@@ -114,12 +139,10 @@ class TenipoScraper:
         logging.info(f"FETCHING data for match ID: {match_id}")
         try:
             self.driver.get(match_page_url)
-            # The original logic did not have an explicit wait here.
-            # We are reverting to that to match the working logs.
-
-            main_xml_str = self._get_decoded_xml_from_request_url(f"match{match_id}.xml")
+            # Wait up to 10 seconds for the individual match file.
+            main_xml_str = self._get_decoded_xml_from_request_url(f"match{match_id}.xml", timeout=10)
             if not main_xml_str:
-                logging.error(f"Failed to get main match data for {match_id}.")
+                logging.error(f"Failed to get main match data for {match_id} after waiting.")
                 return {}
 
             parser = ET.XMLParser(recover=True, encoding='utf-8')
@@ -166,6 +189,7 @@ class TenipoScraper:
                     continue
             return pbp_data
         except TimeoutException:
+            logging.info(f"No point-by-point data available or button not found.")
             return []
         except Exception as e:
             logging.error(f"PBP scraping error: {e}", exc_info=True)
