@@ -16,9 +16,14 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 class TenipoScraper:
     def __init__(self, settings: config.Settings):
         self.settings = settings
-        self.driver: webdriver.Chrome = self._setup_driver()
-        self.driver.get(str(self.settings.LIVESCORE_PAGE_URL))
-        logging.info("TenipoScraper (Selenium) initialized and page context loaded.")
+        self.driver: webdriver.Chrome | None = None
+
+    def start_driver(self):
+        """Initializes the Selenium WebDriver instance."""
+        if self.driver is None:
+            logging.info("Initializing new Selenium driver...")
+            self.driver = self._setup_driver()
+            self.driver.get(str(self.settings.LIVESCORE_PAGE_URL))
 
     def _setup_driver(self) -> webdriver.Chrome:
         chrome_options = Options()
@@ -51,6 +56,9 @@ class TenipoScraper:
         return result
 
     def get_live_matches_summary(self) -> List[Dict[str, Any]]:
+        if self.driver is None:
+            logging.error("Driver is not started. Cannot get summary.")
+            return []
         try:
             del self.driver.requests
             self.driver.get(str(self.settings.LIVESCORE_PAGE_URL))
@@ -75,25 +83,18 @@ class TenipoScraper:
         """
         pbp_data = []
         try:
-            # 1. Click the "PT BY PT" tab.
             pbp_button = WebDriverWait(self.driver, 10).until(
                 EC.element_to_be_clickable((By.ID, "buttonhistoryall"))
             )
             self.driver.execute_script("arguments[0].click();", pbp_button)
-            logging.info("Clicked 'PT BY PT' tab.")
 
-            # 2. THE CORRECT WAIT: Wait for the first game header block to be present on the page.
-            #    This is more reliable than waiting for a container that might not exist.
             WebDriverWait(self.driver, 10).until(
                 EC.presence_of_element_located((By.CLASS_NAME, "ohlavicka1"))
             )
 
-            # 3. Now that we know the content is loaded, find all headers and point blocks.
             game_headers = self.driver.find_elements(By.CLASS_NAME, "ohlavicka1")
             game_point_blocks = self.driver.find_elements(By.CLASS_NAME, "sethistory")
-            logging.info(f"Found {len(game_headers)} game headers and {len(game_point_blocks)} point blocks.")
 
-            # 4. Process each game by pairing a header with its corresponding point block.
             for header_element, points_block_element in zip(game_headers, game_point_blocks):
                 try:
                     header_score = header_element.find_element(By.CLASS_NAME, "ohlavicka3").text.strip()
@@ -110,7 +111,7 @@ class TenipoScraper:
             return pbp_data
 
         except TimeoutException:
-            logging.warning("Timed out waiting for PBP content to load after click. Match may not have PBP data.")
+            logging.warning("Timed out waiting for PBP content to load. Match may not have PBP data.")
             return []
         except Exception as e:
             logging.error(f"A critical error occurred during PBP HTML scraping: {e}", exc_info=True)
@@ -120,11 +121,14 @@ class TenipoScraper:
         """
         HYBRID APPROACH: Gets main data via XML and PBP data via direct HTML scraping.
         """
+        if self.driver is None:
+            logging.error(f"Driver is not started. Cannot fetch match {match_id}")
+            return {}
+
         match_page_url = f"https://tenipo.com/match/-/{match_id}"
         logging.info(f"FETCHING data for match ID: {match_id}")
 
         try:
-            # --- STAGE 1: Get main data via XML interception ---
             del self.driver.requests
             self.driver.get(match_page_url)
 
@@ -141,17 +145,12 @@ class TenipoScraper:
             main_root = ET.fromstring(main_xml_str.encode('utf-8'), parser=parser)
             combined_data = self._xml_to_dict(main_root)
 
-            # --- STAGE 2: Scrape PBP data from rendered HTML ---
             pbp_html_data = self._scrape_html_pbp()
             if pbp_html_data:
                 logging.info(f"Successfully scraped {len(pbp_html_data)} PBP blocks from HTML for match {match_id}.")
-            else:
-                logging.warning(f"No PBP data was scraped from HTML for match {match_id}.")
 
             combined_data['point_by_point_html'] = pbp_html_data
-
             return combined_data
-
         except Exception as e:
             logging.error(f"FATAL: An unhandled error occurred in fetch_match_data for ID {match_id}: {e}",
                           exc_info=True)
@@ -160,21 +159,22 @@ class TenipoScraper:
     def close(self):
         if self.driver:
             self.driver.quit()
+            self.driver = None
 
     def investigate_data_sources(self, match_id: str) -> List[str]:
         """
         Placeholder method for the /investigate endpoint.
-        Navigates to a match page and logs all intercepted request URLs.
         """
+        if self.driver is None:
+            logging.error("Driver is not started. Cannot investigate.")
+            return []
+
         logging.info(f"INVESTIGATING data sources for match ID: {match_id}")
         match_page_url = f"https://tenipo.com/match/-/{match_id}"
         try:
             del self.driver.requests
             self.driver.get(match_page_url)
-            # Give page time to make various background requests
-            WebDriverWait(self.driver, 20).until(
-                lambda d: len(d.requests) > 3  # Wait until a few requests are captured
-            )
+            WebDriverWait(self.driver, 20).until(lambda d: len(d.requests) > 3)
 
             captured_urls = [req.url for req in self.driver.requests]
             logging.info(f"Captured {len(captured_urls)} requests for match {match_id}:")
