@@ -26,25 +26,27 @@ class TenipoScraper:
 
     def start_driver(self):
         if self.driver is None:
-            logging.info("Initializing new Selenium driver...")
+            logging.info("Initializing new Selenium driver with JS interception...")
             self.driver = self._setup_driver()
 
-            # This script will be injected into every new page.
-            # It intercepts XMLHttpRequests and stores their responses on a global window object.
+            # This script will be injected into every new page/frame.
+            # It creates a global storage and hijacks XMLHttpRequest to populate it.
             script_source = """
-                window.capturedResponses = window.capturedResponses || {};
+                window.interceptedResponses = window.interceptedResponses || {};
                 const originalSend = XMLHttpRequest.prototype.send;
                 XMLHttpRequest.prototype.send = function(body) {
                     this.addEventListener('load', function() {
-                        const url = this.responseURL;
-                        if (url && url.includes('.xml')) {
-                            window.capturedResponses[url] = this.responseText;
+                        try {
+                            if (this.responseURL && this.responseURL.includes('.xml')) {
+                                window.interceptedResponses[this.responseURL] = this.responseText;
+                            }
+                        } catch (e) {
+                            console.error('Interception script error:', e);
                         }
                     });
                     originalSend.call(this, body);
                 };
             """
-            # Inject the script to run on all new documents (pages)
             self.driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {"source": script_source})
 
     def _setup_driver(self) -> webdriver.Chrome:
@@ -77,54 +79,54 @@ class TenipoScraper:
             except OSError as e:
                 logging.error(f"Error cleaning up profile {self.profile_path}: {e}")
 
-    def _get_intercepted_xml_from_window(self, url_pattern: str, timeout: int = 15) -> str | None:
+    def _get_intercepted_xml(self, url_pattern: str, timeout: int = 15) -> str | None:
         """
-        Polls the browser's `window.capturedResponses` object until a response matching
-        the URL pattern is found.
+        Polls the in-browser JS object for a captured response that matches the URL pattern.
         """
         end_time = time.monotonic() + timeout
         while time.monotonic() < end_time:
-            all_responses = self.driver.execute_script("return window.capturedResponses;")
-            if not isinstance(all_responses, dict):
-                time.sleep(0.2)
-                continue
-
-            found_url = next((url for url in all_responses if url_pattern in url), None)
-
-            if found_url:
-                logging.info(f"WINDOW_STORAGE: Found response for '{url_pattern}' at URL: {found_url}")
-                body = all_responses[found_url]
-
-                # Tell the browser to delete the captured response to prevent memory leaks
-                self.driver.execute_script(f"delete window.capturedResponses['{found_url}'];")
-
-                decoded_body = self.driver.execute_script("return janko(arguments[0]);", body)
-                logging.info(f"WINDOW_STORAGE: Successfully retrieved and decoded data for '{url_pattern}'.")
-                return decoded_body
+            # This script finds a matching URL, returns its body, and deletes it atomically.
+            script = f"""
+                const url = Object.keys(window.interceptedResponses || {{}}).find(k => k.includes('{url_pattern}'));
+                if (url) {{
+                    const body = window.interceptedResponses[url];
+                    delete window.interceptedResponses[url];
+                    return body;
+                }}
+                return null;
+            """
+            try:
+                body = self.driver.execute_script(script)
+                if body:
+                    decoded_body = self.driver.execute_script("return janko(arguments[0]);", body)
+                    logging.info(f"INTERCEPT: Successfully retrieved and decoded data for '{url_pattern}'.")
+                    return decoded_body
+            except WebDriverException as e:
+                logging.warning(f"Could not execute script, browser may be navigating. Retrying... Error: {e}")
 
             time.sleep(0.25)
 
-        logging.error(f"WINDOW_STORAGE TIMEOUT: Did not find a response for '{url_pattern}' after {timeout} seconds.")
+        logging.error(f"INTERCEPT TIMEOUT: Did not intercept a response for '{url_pattern}' after {timeout} seconds.")
         return None
 
-    def _clear_captured_responses_in_window(self):
-        """Clears the response cache in the browser before navigating."""
+    def _clear_captured_responses(self):
+        """Clears the interception cache in the browser to prevent stale data."""
         if self.driver:
             try:
-                logging.debug("Clearing stale responses from window object in browser.")
-                self.driver.execute_script("window.capturedResponses = {};")
+                self.driver.execute_script("window.interceptedResponses = {};")
+                logging.debug("Cleared in-browser interception cache.")
             except WebDriverException as e:
-                logging.warning(f"Could not clear window responses, driver might be closing: {e}")
+                logging.warning(f"Could not clear browser cache, browser may have been closed. Error: {e}")
 
     def get_live_matches_summary(self) -> List[Dict[str, Any]]:
         if self.driver is None: return []
         try:
-            self._clear_captured_responses_in_window()
+            self._clear_captured_responses()
             self.driver.get(str(self.settings.LIVESCORE_PAGE_URL))
 
-            decoded_xml_string = self._get_intercepted_xml_from_window("change2.xml", timeout=20)
+            decoded_xml_string = self._get_intercepted_xml("change2.xml", timeout=20)
             if not decoded_xml_string:
-                logging.warning("Could not find change2.xml via window storage.")
+                logging.warning("Could not find change2.xml via interception.")
                 return []
 
             parser = ET.XMLParser(recover=True, encoding='utf-8')
@@ -142,12 +144,12 @@ class TenipoScraper:
         match_page_url = f"https://tenipo.com/match/-/{match_id}"
         logging.info(f"FETCHING data for match ID: {match_id}")
         try:
-            self._clear_captured_responses_in_window()
+            self._clear_captured_responses()
             self.driver.get(match_page_url)
 
-            main_xml_str = self._get_intercepted_xml_from_window(f"match{match_id}.xml", timeout=10)
+            main_xml_str = self._get_intercepted_xml(f"match{match_id}.xml", timeout=10)
             if not main_xml_str:
-                logging.error(f"Failed to get main match data for {match_id} via window storage.")
+                logging.error(f"Failed to get main match data for {match_id} via interception.")
                 return {}
 
             parser = ET.XMLParser(recover=True, encoding='utf-8')
