@@ -1,6 +1,5 @@
 import logging
 import asyncio
-import random
 from datetime import datetime, timezone
 from typing import Dict, List
 
@@ -32,9 +31,7 @@ class ScrapingService:
         logging.info("ScrapingService starting up...")
         loop = asyncio.get_event_loop()
 
-        # DEFERRED POOL INITIALIZATION: Only start the main scraper at boot.
-        # The worker pool will be created on the first poll cycle with work to do.
-        self.scraper_pool = None  # Will be initialized later
+        self.scraper_pool = None
         self.all_workers = []
 
         try:
@@ -79,7 +76,6 @@ class ScrapingService:
         logging.info("First poll cycle with work: Initializing worker pool...")
         loop = asyncio.get_event_loop()
 
-        # Double-check to prevent race conditions if this is ever called concurrently
         if self.scraper_pool is not None:
             logging.warning("Worker pool initialization called but pool already exists.")
             return
@@ -95,18 +91,16 @@ class ScrapingService:
                 pool.put_nowait(worker)
                 logging.info(f"POOL_INIT: Worker {i + 1} started and added to pool.")
 
-            # Atomically update the service state only after all workers are ready
             self.all_workers = created_workers
             self.scraper_pool = pool
             logging.info(f"Scraper pool fully populated with {self.scraper_pool.qsize()} workers.")
         except Exception as e:
             logging.error(f"POOL_INIT: Failed to initialize worker pool. Will retry on next poll cycle. Error: {e}",
                           exc_info=True)
-            # Clean up any partially created workers
             for worker in created_workers:
                 await loop.run_in_executor(None, worker.close)
             self.all_workers = []
-            self.scraper_pool = None  # Ensure it remains None so we retry on the next cycle
+            self.scraper_pool = None
 
     async def _process_single_match(self, match_id: str) -> tuple[str, dict | None]:
         """Checks out a scraper from the pool, processes one match, and returns it."""
@@ -115,7 +109,6 @@ class ScrapingService:
         try:
             worker = await self.scraper_pool.get()
             logging.info(f"MATCH_TASK({match_id}): Worker acquired. Processing...")
-            await asyncio.sleep(random.uniform(0.5, 1.5))
             raw_data = await loop.run_in_executor(None, lambda: worker.fetch_match_data(match_id))
 
             if not raw_data:
@@ -143,21 +136,30 @@ class ScrapingService:
                     await asyncio.sleep(self.settings.CACHE_REFRESH_INTERVAL_SECONDS)
                     continue
 
-                all_matches_summary = await loop.run_in_executor(None, self.main_scraper.get_live_matches_summary)
+                # Fetch summary and check for success
+                summary_success, all_matches_summary = await loop.run_in_executor(None, self.main_scraper.get_live_matches_summary)
+
+                # --- CRITICAL SAFETY CHECK ---
+                # If the summary fetch failed, we do NOT proceed. This prevents us from
+                # accidentally wiping the database based on faulty data.
+                if not summary_success:
+                    logging.warning("Main scraper failed to get a valid summary. Skipping this poll cycle to prevent data loss.")
+                    await asyncio.sleep(self.settings.CACHE_REFRESH_INTERVAL_SECONDS)
+                    continue
+
                 itf_matches_summary = [m for m in all_matches_summary if
                                        m and "ITF" in m.get("tournament_name", "") and "ATP" not in m.get(
                                            "tournament_name", "")]
                 logging.info(f"Found {len(itf_matches_summary)} live ITF matches to process.")
                 live_match_ids = [m['id'] for m in itf_matches_summary if m and 'id' in m]
 
+                # Now it's safe to prune, because we know the live_match_ids list is reliable.
                 if self.mongo_manager and self.mongo_manager.client:
                     await loop.run_in_executor(None, lambda: self.mongo_manager.prune_completed_matches(live_match_ids))
 
-                # LAZY INITIALIZATION: Create the worker pool if it doesn't exist and we have matches to process.
                 if self.scraper_pool is None and live_match_ids:
                     await self._initialize_worker_pool()
 
-                # Proceed only if the pool is ready and there's work to do.
                 if live_match_ids and self.scraper_pool:
                     tasks = [self._process_single_match(match_id) for match_id in live_match_ids]
                     logging.info(f"Processing {len(tasks)} matches concurrently with worker pool...")

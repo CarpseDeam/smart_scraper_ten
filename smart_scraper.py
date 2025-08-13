@@ -29,8 +29,6 @@ class TenipoScraper:
             logging.info("Initializing new Selenium driver with JS interception...")
             self.driver = self._setup_driver()
 
-            # This script will be injected into every new page/frame.
-            # It creates a global storage and hijacks XMLHttpRequest to populate it.
             script_source = """
                 window.interceptedResponses = window.interceptedResponses || {};
                 const originalSend = XMLHttpRequest.prototype.send;
@@ -80,12 +78,8 @@ class TenipoScraper:
                 logging.error(f"Error cleaning up profile {self.profile_path}: {e}")
 
     def _get_intercepted_xml(self, url_pattern: str, timeout: int = 15) -> str | None:
-        """
-        Polls the in-browser JS object for a captured response that matches the URL pattern.
-        """
         end_time = time.monotonic() + timeout
         while time.monotonic() < end_time:
-            # This script finds a matching URL, returns its body, and deletes it atomically.
             script = f"""
                 const url = Object.keys(window.interceptedResponses || {{}}).find(k => k.includes('{url_pattern}'));
                 if (url) {{
@@ -110,7 +104,6 @@ class TenipoScraper:
         return None
 
     def _clear_captured_responses(self):
-        """Clears the interception cache in the browser to prevent stale data."""
         if self.driver:
             try:
                 self.driver.execute_script("window.interceptedResponses = {};")
@@ -118,26 +111,37 @@ class TenipoScraper:
             except WebDriverException as e:
                 logging.warning(f"Could not clear browser cache, browser may have been closed. Error: {e}")
 
-    def get_live_matches_summary(self) -> List[Dict[str, Any]]:
-        if self.driver is None: return []
+    def get_live_matches_summary(self) -> tuple[bool, List[Dict[str, Any]]]:
+        """
+        Fetches the summary of live matches.
+        Returns a tuple: (success_status, data)
+        """
+        if self.driver is None:
+            return False, []
         try:
             self._clear_captured_responses()
             self.driver.get(str(self.settings.LIVESCORE_PAGE_URL))
 
             decoded_xml_string = self._get_intercepted_xml("change2.xml", timeout=20)
             if not decoded_xml_string:
-                logging.warning("Could not find change2.xml via interception.")
-                return []
+                logging.warning("Could not find change2.xml via interception. Returning failure status.")
+                return False, []
 
             parser = ET.XMLParser(recover=True, encoding='utf-8')
             root = ET.fromstring(decoded_xml_string.encode('utf-8'), parser=parser)
-            if root is None: return []
+            if root is None:
+                logging.warning("Parsed XML root is None. Returning failure status.")
+                return False, []
+
             match_tags = root.findall("./match") or root.findall("./event")
             logging.info(f"Found {len(match_tags)} match/event tags in summary XML.")
-            return [self._xml_to_dict(tag) for tag in match_tags]
+
+            # Success: return True and the data
+            return True, [self._xml_to_dict(tag) for tag in match_tags]
+
         except Exception as e:
             logging.error(f"Error in get_live_matches_summary: {e}", exc_info=True)
-            return []
+            return False, []
 
     def fetch_match_data(self, match_id: str) -> Dict[str, Any]:
         if self.driver is None: return {}
