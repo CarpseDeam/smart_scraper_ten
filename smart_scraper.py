@@ -58,7 +58,6 @@ class TenipoScraper:
             self.driver.quit()
             self.driver = None
 
-        # --- CRITICAL FIX: Clean up the temporary profile folder ---
         if self.profile_path and os.path.exists(self.profile_path):
             try:
                 shutil.rmtree(self.profile_path)
@@ -66,8 +65,6 @@ class TenipoScraper:
             except OSError as e:
                 logging.error(f"Error cleaning up profile {self.profile_path}: {e}")
         self.profile_path = None
-
-    # ... The rest of the methods (_xml_to_dict, get_live_matches_summary, etc.) are unchanged ...
 
     def _xml_to_dict(self, element: ET.Element) -> dict:
         if element is None: return {}

@@ -22,7 +22,7 @@ class Settings(BaseSettings):
         description="The interval in seconds between each poll for live match data."
     )
     CONCURRENT_SCRAPER_LIMIT: int = Field(
-        default=8,
+        default=3,
         description="The maximum number of scrapers to run at the same time. Tuned for a Railway Pro plan."
     )
 

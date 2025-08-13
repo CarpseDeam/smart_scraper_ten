@@ -37,7 +37,6 @@ class ScrapingService:
             await loop.run_in_executor(None, self.main_scraper.start_driver)
             logging.info("Main scraper for summary list started successfully.")
 
-            # --- CRITICAL FIX: Start workers sequentially to avoid OS thread limits ---
             self.scraper_pool = asyncio.Queue(maxsize=self.settings.CONCURRENT_SCRAPER_LIMIT)
             for i in range(self.settings.CONCURRENT_SCRAPER_LIMIT):
                 logging.info(f"POOL: Starting worker {i + 1}/{self.settings.CONCURRENT_SCRAPER_LIMIT}...")
