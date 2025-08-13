@@ -6,6 +6,7 @@ import json
 import time
 from lxml import etree as ET
 from typing import List, Dict, Any
+from threading import Lock
 
 import config
 from selenium import webdriver
@@ -23,11 +24,43 @@ class TenipoScraper:
         self.settings = settings
         self.driver: webdriver.Chrome | None = None
         self.profile_path: str | None = None
+        self._response_data_lock = Lock()
+        self.captured_responses: Dict[str, str] = {}
 
     def start_driver(self):
         if self.driver is None:
-            logging.info("Initializing new Selenium driver...")
+            logging.info("Initializing new Selenium driver with interception...")
             self.driver = self._setup_driver()
+
+            def on_binding(event):
+                if event['name'] == 'interceptResponse':
+                    try:
+                        payload = json.loads(event['payload'])
+                        url = payload['url']
+                        body = payload['body']
+                        with self._response_data_lock:
+                            self.captured_responses[url] = body
+                    except Exception as e:
+                        logging.error(f"Error processing intercepted response: {e}")
+
+            self.driver.callbacks['Runtime.bindingCalled'] = on_binding
+            self.driver.execute_cdp_cmd("Runtime.addBinding", {"name": "interceptResponse"})
+
+            # This script will be injected into every new page
+            script_source = """
+                const originalSend = XMLHttpRequest.prototype.send;
+                XMLHttpRequest.prototype.send = function(body) {
+                    this.addEventListener('load', function() {
+                        const url = this.responseURL;
+                        if (url && url.includes('.xml')) {
+                            const responseText = this.responseText;
+                            window.interceptResponse({url: url, body: responseText});
+                        }
+                    });
+                    originalSend.call(this, body);
+                };
+            """
+            self.driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {"source": script_source})
 
     def _setup_driver(self) -> webdriver.Chrome:
         chrome_options = Options()
@@ -40,9 +73,6 @@ class TenipoScraper:
         chrome_options.add_argument("--disable-gpu")
         chrome_options.add_argument("--remote-debugging-port=0")
         chrome_options.add_argument(f"user-agent={self.settings.USER_AGENT}")
-
-        logging_prefs = {'performance': 'ALL'}
-        chrome_options.set_capability('goog:loggingPrefs', logging_prefs)
 
         try:
             driver = webdriver.Chrome(options=chrome_options)
@@ -62,65 +92,38 @@ class TenipoScraper:
             except OSError as e:
                 logging.error(f"Error cleaning up profile {self.profile_path}: {e}")
 
-    def _get_decoded_xml_from_request_url(self, url_pattern: str, timeout: int = 15) -> str | None:
-        """
-        Polls the performance logs until a request containing the URL pattern is found.
-        This is more robust than a single check, which can fail due to race conditions.
-        """
+    def _get_intercepted_xml(self, url_pattern: str, timeout: int = 15) -> str | None:
+        """Waits for a captured response that matches the URL pattern."""
         end_time = time.monotonic() + timeout
-        request_id = None
-
         while time.monotonic() < end_time:
-            try:
-                logs = self.driver.get_log('performance')
-                for log_entry in logs:
-                    try:
-                        message = json.loads(log_entry.get('message', '{}')).get('message', {})
-                        if 'Network.responseReceived' not in message.get('method', ''):
-                            continue
+            with self._response_data_lock:
+                # Find a URL that contains the pattern
+                found_url = next((url for url in self.captured_responses if url_pattern in url), None)
+                if found_url:
+                    body = self.captured_responses.pop(found_url)
+                    decoded_body = self.driver.execute_script("return janko(arguments[0]);", body)
+                    logging.info(f"INTERCEPT: Successfully retrieved and decoded data for '{url_pattern}'.")
+                    return decoded_body
+            time.sleep(0.2)
 
-                        params = message.get('params', {})
-                        url = params.get('response', {}).get('url', '')
+        logging.error(f"INTERCEPT TIMEOUT: Did not intercept a response for '{url_pattern}' after {timeout} seconds.")
+        return None
 
-                        if url_pattern in url:
-                            request_id = params.get('requestId')
-                            if request_id:
-                                logging.info(f"Found request for '{url_pattern}' with ID: {request_id}")
-                                break  # Exit inner loop
-                    except (json.JSONDecodeError, AttributeError):
-                        continue  # Ignore malformed log entries
-
-                if request_id:
-                    break  # Exit outer loop
-            except WebDriverException as e:
-                logging.warning(f"Error accessing performance logs, will retry: {e}")
-
-            time.sleep(0.5)  # Wait before polling again
-
-        if not request_id:
-            logging.error(f"TIMEOUT: Did not find network request containing '{url_pattern}' after {timeout} seconds.")
-            return None
-
-        try:
-            body_data = self.driver.execute_cdp_cmd('Network.getResponseBody', {'requestId': request_id})
-            payload_str = body_data.get('body', '')
-            if payload_str:
-                return self.driver.execute_script("return janko(arguments[0]);", payload_str)
-            else:
-                logging.warning(f"Request {request_id} for '{url_pattern}' had an empty body.")
-                return None
-        except Exception as e:
-            logging.error(f"Failed to get/decode response body for request {request_id}: {e}", exc_info=True)
-            return None
+    def _clear_captured_responses(self):
+        with self._response_data_lock:
+            if self.captured_responses:
+                logging.debug(f"Clearing {len(self.captured_responses)} stale captured responses.")
+                self.captured_responses.clear()
 
     def get_live_matches_summary(self) -> List[Dict[str, Any]]:
         if self.driver is None: return []
         try:
+            self._clear_captured_responses()
             self.driver.get(str(self.settings.LIVESCORE_PAGE_URL))
-            # Wait up to 20 seconds for the main summary file, which can be slow.
-            decoded_xml_string = self._get_decoded_xml_from_request_url("change2.xml", timeout=20)
+
+            decoded_xml_string = self._get_intercepted_xml("change2.xml", timeout=20)
             if not decoded_xml_string:
-                logging.warning("Could not find change2.xml in network traffic after waiting.")
+                logging.warning("Could not find change2.xml via interception.")
                 return []
 
             parser = ET.XMLParser(recover=True, encoding='utf-8')
@@ -138,11 +141,12 @@ class TenipoScraper:
         match_page_url = f"https://tenipo.com/match/-/{match_id}"
         logging.info(f"FETCHING data for match ID: {match_id}")
         try:
+            self._clear_captured_responses()
             self.driver.get(match_page_url)
-            # Wait up to 10 seconds for the individual match file.
-            main_xml_str = self._get_decoded_xml_from_request_url(f"match{match_id}.xml", timeout=10)
+
+            main_xml_str = self._get_intercepted_xml(f"match{match_id}.xml", timeout=10)
             if not main_xml_str:
-                logging.error(f"Failed to get main match data for {match_id} after waiting.")
+                logging.error(f"Failed to get main match data for {match_id} via interception.")
                 return {}
 
             parser = ET.XMLParser(recover=True, encoding='utf-8')
@@ -189,7 +193,7 @@ class TenipoScraper:
                     continue
             return pbp_data
         except TimeoutException:
-            logging.info(f"No point-by-point data available or button not found.")
+            logging.info(f"No point-by-point data available or button not found for this match.")
             return []
         except Exception as e:
             logging.error(f"PBP scraping error: {e}", exc_info=True)
