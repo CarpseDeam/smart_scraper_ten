@@ -22,8 +22,8 @@ class Settings(BaseSettings):
         description="The interval in seconds between each poll for live match data."
     )
     CONCURRENT_SCRAPER_LIMIT: int = Field(
-        default=1,
-        description="The maximum number of scrapers to run. SET TO 1 FOR MAXIMUM STABILITY to avoid OS thread limits."
+        default=3,
+        description="The maximum number of scrapers to run at the same time. Tuned for the lighter selenium engine."
     )
 
     # --- Database Settings ---
@@ -32,11 +32,11 @@ class Settings(BaseSettings):
         description="The full connection string URI for the MongoDB database."
     )
     MONGO_DB_NAME: str = Field(
-        default="edgeAI",  # This is the corrected database name from the client.
+        default="edgeAI",
         description="The name of the database to use within MongoDB."
     )
 
-    # --- The rest of your settings are unchanged ---
+    # --- Monitoring Settings (MUST be set in environment) ---
     TELEGRAM_BOT_TOKEN: str = Field(
         description="The secret token for the Telegram bot. MUST be set as an environment variable."
     )
