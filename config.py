@@ -22,8 +22,8 @@ class Settings(BaseSettings):
         description="The interval in seconds between each poll for live match data."
     )
     CONCURRENT_SCRAPER_LIMIT: int = Field(
-        default=3,
-        description="The maximum number of scrapers to run at the same time. Tuned for stability."
+        default=1,
+        description="The maximum number of scrapers to run. SET TO 1 FOR MAXIMUM STABILITY to avoid OS thread limits."
     )
 
     # --- Database Settings ---
@@ -36,7 +36,7 @@ class Settings(BaseSettings):
         description="The name of the database to use within MongoDB."
     )
 
-    # --- Monitoring Settings (MUST be set in environment) ---
+    # --- The rest of your settings are unchanged ---
     TELEGRAM_BOT_TOKEN: str = Field(
         description="The secret token for the Telegram bot. MUST be set as an environment variable."
     )
