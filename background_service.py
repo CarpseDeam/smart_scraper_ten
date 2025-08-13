@@ -115,7 +115,7 @@ class ScrapingService:
                         await asyncio.sleep(self.settings.CACHE_REFRESH_INTERVAL_SECONDS)
                         continue
 
-                all_matches_summary = await loop.run_in_executor(None, self.scraper.get_live_matches__summary)
+                all_matches_summary = await loop.run_in_executor(None, self.scraper.get_live_matches_summary)
 
                 itf_matches_summary = [
                     m for m in all_matches_summary if m and
