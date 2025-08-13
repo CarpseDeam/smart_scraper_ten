@@ -28,29 +28,22 @@ class ScrapingService:
         logging.info(f"ScrapingService initialized. Concurrency limit is {self.settings.CONCURRENT_SCRAPER_LIMIT}.")
 
     async def start(self):
-        """Initializes all resources and starts the background polling task."""
+        """Initializes the main scraper and starts the background polling task."""
         logging.info("ScrapingService starting up...")
         loop = asyncio.get_event_loop()
+
+        # DEFERRED POOL INITIALIZATION: Only start the main scraper at boot.
+        # The worker pool will be created on the first poll cycle with work to do.
+        self.scraper_pool = None  # Will be initialized later
+        self.all_workers = []
 
         try:
             self.main_scraper = TenipoScraper(self.settings)
             await loop.run_in_executor(None, self.main_scraper.start_driver)
             logging.info("Main scraper for summary list started successfully.")
-
-            self.scraper_pool = asyncio.Queue(maxsize=self.settings.CONCURRENT_SCRAPER_LIMIT)
-            for i in range(self.settings.CONCURRENT_SCRAPER_LIMIT):
-                logging.info(f"POOL: Starting worker {i + 1}/{self.settings.CONCURRENT_SCRAPER_LIMIT}...")
-                worker = TenipoScraper(self.settings)
-                await loop.run_in_executor(None, worker.start_driver)
-                self.all_workers.append(worker)
-                self.scraper_pool.put_nowait(worker)
-                logging.info(
-                    f"POOL: Worker {i + 1}/{self.settings.CONCURRENT_SCRAPER_LIMIT} started and added to pool.")
-            logging.info(f"Scraper pool fully populated with {self.scraper_pool.qsize()} workers.")
-
         except Exception as e:
             logging.critical(
-                f"FATAL: A scraper instance failed to start during initialization. Service will not poll. Error: {e}",
+                f"FATAL: The main scraper instance failed to start during initialization. Service will not poll. Error: {e}",
                 exc_info=True)
             return
 
@@ -80,6 +73,40 @@ class ScrapingService:
         if self.mongo_manager:
             self.mongo_manager.close()
         logging.info("ScrapingService shutdown complete.")
+
+    async def _initialize_worker_pool(self):
+        """Creates and starts the pool of scraper workers on demand."""
+        logging.info("First poll cycle with work: Initializing worker pool...")
+        loop = asyncio.get_event_loop()
+
+        # Double-check to prevent race conditions if this is ever called concurrently
+        if self.scraper_pool is not None:
+            logging.warning("Worker pool initialization called but pool already exists.")
+            return
+
+        created_workers = []
+        try:
+            pool = asyncio.Queue(maxsize=self.settings.CONCURRENT_SCRAPER_LIMIT)
+            for i in range(self.settings.CONCURRENT_SCRAPER_LIMIT):
+                logging.info(f"POOL_INIT: Starting worker {i + 1}/{self.settings.CONCURRENT_SCRAPER_LIMIT}...")
+                worker = TenipoScraper(self.settings)
+                await loop.run_in_executor(None, worker.start_driver)
+                created_workers.append(worker)
+                pool.put_nowait(worker)
+                logging.info(f"POOL_INIT: Worker {i + 1} started and added to pool.")
+
+            # Atomically update the service state only after all workers are ready
+            self.all_workers = created_workers
+            self.scraper_pool = pool
+            logging.info(f"Scraper pool fully populated with {self.scraper_pool.qsize()} workers.")
+        except Exception as e:
+            logging.error(f"POOL_INIT: Failed to initialize worker pool. Will retry on next poll cycle. Error: {e}",
+                          exc_info=True)
+            # Clean up any partially created workers
+            for worker in created_workers:
+                await loop.run_in_executor(None, worker.close)
+            self.all_workers = []
+            self.scraper_pool = None  # Ensure it remains None so we retry on the next cycle
 
     async def _process_single_match(self, match_id: str) -> tuple[str, dict | None]:
         """Checks out a scraper from the pool, processes one match, and returns it."""
@@ -126,13 +153,21 @@ class ScrapingService:
                 if self.mongo_manager and self.mongo_manager.client:
                     await loop.run_in_executor(None, lambda: self.mongo_manager.prune_completed_matches(live_match_ids))
 
-                if live_match_ids:
+                # LAZY INITIALIZATION: Create the worker pool if it doesn't exist and we have matches to process.
+                if self.scraper_pool is None and live_match_ids:
+                    await self._initialize_worker_pool()
+
+                # Proceed only if the pool is ready and there's work to do.
+                if live_match_ids and self.scraper_pool:
                     tasks = [self._process_single_match(match_id) for match_id in live_match_ids]
                     logging.info(f"Processing {len(tasks)} matches concurrently with worker pool...")
                     results = await asyncio.gather(*tasks)
                     new_cache_data = {match_id: data for match_id, data in results if data}
                 else:
                     new_cache_data = {}
+                    if live_match_ids and self.scraper_pool is None:
+                        logging.warning(
+                            "Could not process matches this cycle because worker pool failed to initialize.")
 
                 self.live_data_cache["data"] = new_cache_data
                 self.live_data_cache["last_updated"] = datetime.now(timezone.utc)
