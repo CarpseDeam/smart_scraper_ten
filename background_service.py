@@ -22,8 +22,6 @@ class ScrapingService:
         self.stall_monitor: StallMonitor | None = None
         self.polling_task: asyncio.Task | None = None
         self.live_data_cache: Dict = {"data": {}, "last_updated": None}
-
-        # --- Worker Pool Setup ---
         self.main_scraper: TenipoScraper | None = None
         self.scraper_pool: asyncio.Queue[TenipoScraper] | None = None
         self.all_workers: List[TenipoScraper] = []
@@ -35,24 +33,26 @@ class ScrapingService:
         loop = asyncio.get_event_loop()
 
         try:
-            # --- Start the Main Scraper (for the summary list) ---
             self.main_scraper = TenipoScraper(self.settings)
             await loop.run_in_executor(None, self.main_scraper.start_driver)
             logging.info("Main scraper for summary list started successfully.")
 
-            # --- Start the Worker Pool (for concurrent match details) ---
+            # --- CRITICAL FIX: Start workers sequentially to avoid OS thread limits ---
             self.scraper_pool = asyncio.Queue(maxsize=self.settings.CONCURRENT_SCRAPER_LIMIT)
             for i in range(self.settings.CONCURRENT_SCRAPER_LIMIT):
-                logging.info(f"Starting worker {i + 1}/{self.settings.CONCURRENT_SCRAPER_LIMIT}...")
+                logging.info(f"POOL: Starting worker {i + 1}/{self.settings.CONCURRENT_SCRAPER_LIMIT}...")
                 worker = TenipoScraper(self.settings)
                 await loop.run_in_executor(None, worker.start_driver)
                 self.all_workers.append(worker)
                 self.scraper_pool.put_nowait(worker)
+                logging.info(
+                    f"POOL: Worker {i + 1}/{self.settings.CONCURRENT_SCRAPER_LIMIT} started and added to pool.")
             logging.info(f"Scraper pool fully populated with {self.scraper_pool.qsize()} workers.")
 
         except Exception as e:
-            logging.critical(f"FATAL: A scraper instance failed to start. Service will not poll. Error: {e}",
-                             exc_info=True)
+            logging.critical(
+                f"FATAL: A scraper instance failed to start during initialization. Service will not poll. Error: {e}",
+                exc_info=True)
             return
 
         self.mongo_manager = MongoManager(self.settings)
@@ -73,47 +73,35 @@ class ScrapingService:
                 logging.info("Polling task successfully cancelled.")
 
         loop = asyncio.get_event_loop()
-        # Close all worker scrapers
-        for worker in self.all_workers:
-            await loop.run_in_executor(None, worker.close)
-        # Close the main scraper
-        if self.main_scraper:
-            await loop.run_in_executor(None, self.main_scraper.close)
+        all_scrapers_to_close = self.all_workers + ([self.main_scraper] if self.main_scraper else [])
+        for i, scraper in enumerate(all_scrapers_to_close):
+            logging.info(f"Closing scraper {i + 1}/{len(all_scrapers_to_close)}...")
+            await loop.run_in_executor(None, scraper.close)
 
         if self.mongo_manager:
             self.mongo_manager.close()
         logging.info("ScrapingService shutdown complete.")
 
     async def _process_single_match(self, match_id: str) -> tuple[str, dict | None]:
-        """
-        Checks out a scraper from the pool, processes one match, and returns the scraper.
-        """
+        """Checks out a scraper from the pool, processes one match, and returns it."""
         loop = asyncio.get_event_loop()
         worker = None
         try:
-            # "Check out" a worker. This will wait if the pool is empty.
             worker = await self.scraper_pool.get()
             logging.info(f"MATCH_TASK({match_id}): Worker acquired. Processing...")
-
-            # Add jitter here to be polite
             await asyncio.sleep(random.uniform(0.5, 1.5))
-
             raw_data = await loop.run_in_executor(None, lambda: worker.fetch_match_data(match_id))
 
             if not raw_data:
                 return match_id, None
-
             formatted_data = transform_match_data_to_client_format(raw_data, match_id)
-
             if self.mongo_manager and self.mongo_manager.client:
                 await loop.run_in_executor(None, lambda: self.mongo_manager.save_match_data(match_id, formatted_data))
-
             return match_id, formatted_data
         except Exception as e:
             logging.error(f"MATCH_TASK({match_id}): Unhandled exception during processing: {e}", exc_info=True)
             return match_id, None
         finally:
-            # CRITICAL: Always return the worker to the pool.
             if worker:
                 self.scraper_pool.put_nowait(worker)
                 logging.info(f"MATCH_TASK({match_id}): Worker released back to pool.")
@@ -130,13 +118,9 @@ class ScrapingService:
                     continue
 
                 all_matches_summary = await loop.run_in_executor(None, self.main_scraper.get_live_matches_summary)
-
-                itf_matches_summary = [
-                    m for m in all_matches_summary if m and
-                                                      "ITF" in m.get("tournament_name", "") and
-                                                      "ATP" not in m.get("tournament_name", "")
-                ]
-
+                itf_matches_summary = [m for m in all_matches_summary if
+                                       m and "ITF" in m.get("tournament_name", "") and "ATP" not in m.get(
+                                           "tournament_name", "")]
                 logging.info(f"Found {len(itf_matches_summary)} live ITF matches to process.")
                 live_match_ids = [m['id'] for m in itf_matches_summary if m and 'id' in m]
 
