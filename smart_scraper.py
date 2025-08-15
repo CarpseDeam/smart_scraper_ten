@@ -112,10 +112,6 @@ class TenipoScraper:
                 logging.warning(f"Could not clear browser cache, browser may have been closed. Error: {e}")
 
     def get_live_matches_summary(self) -> tuple[bool, List[Dict[str, Any]]]:
-        """
-        Fetches the summary of live matches.
-        Returns a tuple: (success_status, data)
-        """
         if self.driver is None:
             return False, []
         try:
@@ -133,11 +129,27 @@ class TenipoScraper:
                 logging.warning("Parsed XML root is None. Returning failure status.")
                 return False, []
 
-            match_tags = root.findall("./match") or root.findall("./event")
-            logging.info(f"Found {len(match_tags)} match/event tags in summary XML.")
+            # --- THE NEW LOGIC ---
+            # Create a flat list of all matches from all tournaments.
+            all_parsed_matches = []
+            tournaments = root.findall("./event")
+            for tournament_element in tournaments:
+                # Extract tournament-level info (Box A for category, Box B for full name)
+                tournament_category = tournament_element.get("tournament_name", "")
+                full_tournament_name = tournament_element.get("name", tournament_category)
 
-            # Success: return True and the data
-            return True, [self._xml_to_dict(tag) for tag in match_tags]
+                # Find all matches within this tournament
+                matches_in_tournament = tournament_element.findall("./match")
+                for match_element in matches_in_tournament:
+                    # Convert match XML element to dictionary
+                    match_data = self._xml_to_dict(match_element)
+                    # Add the parent tournament's info to the match data
+                    match_data['tournament_name_category'] = tournament_category  # For filtering
+                    match_data['tournament_name_full'] = full_tournament_name  # For display
+                    all_parsed_matches.append(match_data)
+
+            logging.info(f"Parsed a total of {len(all_parsed_matches)} matches from {len(tournaments)} tournaments.")
+            return True, all_parsed_matches
 
         except Exception as e:
             logging.error(f"Error in get_live_matches_summary: {e}", exc_info=True)

@@ -102,20 +102,35 @@ class ScrapingService:
             self.all_workers = []
             self.scraper_pool = None
 
-    async def _process_single_match(self, match_id: str) -> tuple[str, dict | None]:
-        """Checks out a scraper from the pool, processes one match, and returns it."""
+    async def _process_single_match(self, match_summary: dict) -> tuple[str, dict | None]:
+        """
+        Processes a single match. It receives the summary data (which includes the correct
+        tournament name) and fetches detailed data to be combined by the mapper.
+        """
         loop = asyncio.get_event_loop()
         worker = None
+        match_id = match_summary.get('id')
+        correct_tournament_name = match_summary.get('tournament_name_full')
+
+        if not match_id or not correct_tournament_name:
+            logging.warning(f"Skipping match with invalid summary data: {match_summary}")
+            return None, None
+
         try:
             worker = await self.scraper_pool.get()
             logging.info(f"MATCH_TASK({match_id}): Worker acquired. Processing...")
-            raw_data = await loop.run_in_executor(None, lambda: worker.fetch_match_data(match_id))
+            # Fetch the detailed XML data for this specific match
+            raw_detailed_data = await loop.run_in_executor(None, lambda: worker.fetch_match_data(match_id))
 
-            if not raw_data:
+            if not raw_detailed_data:
                 return match_id, None
-            formatted_data = transform_match_data_to_client_format(raw_data, match_id)
+
+            # Map the detailed data, but provide the correct tournament name from the summary
+            formatted_data = transform_match_data_to_client_format(raw_detailed_data, match_id, correct_tournament_name)
+
             if self.mongo_manager and self.mongo_manager.client:
                 await loop.run_in_executor(None, lambda: self.mongo_manager.save_match_data(match_id, formatted_data))
+
             return match_id, formatted_data
         except Exception as e:
             logging.error(f"MATCH_TASK({match_id}): Unhandled exception during processing: {e}", exc_info=True)
@@ -136,35 +151,38 @@ class ScrapingService:
                     await asyncio.sleep(self.settings.CACHE_REFRESH_INTERVAL_SECONDS)
                     continue
 
-                # Fetch summary and check for success
-                summary_success, all_matches_summary = await loop.run_in_executor(None, self.main_scraper.get_live_matches_summary)
+                summary_success, all_matches_summary = await loop.run_in_executor(None,
+                                                                                  self.main_scraper.get_live_matches_summary)
 
-                # --- CRITICAL SAFETY CHECK ---
-                # If the summary fetch failed, we do NOT proceed. This prevents us from
-                # accidentally wiping the database based on faulty data.
                 if not summary_success:
-                    logging.warning("Main scraper failed to get a valid summary. Skipping this poll cycle to prevent data loss.")
+                    logging.warning(
+                        "Main scraper failed to get a valid summary. Skipping this poll cycle to prevent data loss.")
                     await asyncio.sleep(self.settings.CACHE_REFRESH_INTERVAL_SECONDS)
                     continue
 
-                itf_matches_summary = [m for m in all_matches_summary if
-                                       m and "ITF" in m.get("tournament_name", "") and "ATP" not in m.get(
-                                           "tournament_name", "")]
-                logging.info(f"Found {len(itf_matches_summary)} live ITF matches to process.")
+                # --- CORRECTED FILTERING LOGIC ---
+                # Use the 'tournament_name_category' (Box A) for reliable filtering
+                itf_matches_summary = [
+                    m for m in all_matches_summary
+                    if m and "ITF" in m.get("tournament_name_category", "") and "ATP" not in m.get(
+                        "tournament_name_category", "")
+                ]
+
+                logging.info(f"Found {len(itf_matches_summary)} live ITF matches to process after filtering.")
                 live_match_ids = [m['id'] for m in itf_matches_summary if m and 'id' in m]
 
-                # Now it's safe to prune, because we know the live_match_ids list is reliable.
                 if self.mongo_manager and self.mongo_manager.client:
                     await loop.run_in_executor(None, lambda: self.mongo_manager.prune_completed_matches(live_match_ids))
 
                 if self.scraper_pool is None and live_match_ids:
                     await self._initialize_worker_pool()
 
-                if live_match_ids and self.scraper_pool:
-                    tasks = [self._process_single_match(match_id) for match_id in live_match_ids]
+                if itf_matches_summary and self.scraper_pool:
+                    # Pass the entire summary object for each match to the processing function
+                    tasks = [self._process_single_match(match_summary) for match_summary in itf_matches_summary]
                     logging.info(f"Processing {len(tasks)} matches concurrently with worker pool...")
                     results = await asyncio.gather(*tasks)
-                    new_cache_data = {match_id: data for match_id, data in results if data}
+                    new_cache_data = {match_id: data for match_id, data in results if data and match_id}
                 else:
                     new_cache_data = {}
                     if live_match_ids and self.scraper_pool is None:

@@ -112,8 +112,11 @@ def _parse_stats_string(stats_str: str) -> list:
     ]
 
 
-# FIX: Added 'match_id' as an argument to the function.
-def transform_match_data_to_client_format(raw_data: dict, match_id: str) -> dict:
+def transform_match_data_to_client_format(
+    raw_data: dict,
+    match_id: str,
+    correct_tournament_name: str
+) -> dict:
     if "match" not in raw_data:
         logging.warning("transform_match_data called with invalid data format.")
         return {}
@@ -127,9 +130,10 @@ def transform_match_data_to_client_format(raw_data: dict, match_id: str) -> dict
                                  _safe_get_from_dict(match_info, "country2", ""))
 
     return {
-        # FIX: Added the match_url field to satisfy the database's unique index.
         "match_url": f"https://tenipo.com/match/-/{match_id}",
-        "tournament": _safe_get_from_dict(match_info, "tournament_name"),
+        # --- THE FIX for the wrong name ---
+        # We use the correct name passed in from the summary, ignoring the bad data in this file.
+        "tournament": correct_tournament_name,
         "round": _parse_round_info(_safe_get_from_dict(match_info, "round", "")).get("round_name"),
         "timePolled": datetime.now(timezone.utc).isoformat(),
         "players": [p1_info, p2_info],
