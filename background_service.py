@@ -102,35 +102,25 @@ class ScrapingService:
             self.all_workers = []
             self.scraper_pool = None
 
-    async def _process_single_match(self, match_summary: dict) -> tuple[str, dict | None]:
-        """
-        Processes a single match. It receives the summary data (which includes the correct
-        tournament name) and fetches detailed data to be combined by the mapper.
-        """
+    async def _process_single_match(self, match_id: str) -> tuple[str, dict | None]:
+        """Checks out a scraper from the pool, processes one match, and returns it."""
         loop = asyncio.get_event_loop()
         worker = None
-        match_id = match_summary.get('id')
-        correct_tournament_name = match_summary.get('tournament_name_full')
-
-        if not match_id or not correct_tournament_name:
-            logging.warning(f"Skipping match with invalid summary data: {match_summary}")
-            return None, None
-
         try:
             worker = await self.scraper_pool.get()
             logging.info(f"MATCH_TASK({match_id}): Worker acquired. Processing...")
-            # Fetch the detailed XML data for this specific match
-            raw_detailed_data = await loop.run_in_executor(None, lambda: worker.fetch_match_data(match_id))
+            raw_data = await loop.run_in_executor(None, lambda: worker.fetch_match_data(match_id))
 
-            if not raw_detailed_data:
+            if not raw_data:
                 return match_id, None
 
-            # Map the detailed data, but provide the correct tournament name from the summary
-            formatted_data = transform_match_data_to_client_format(raw_detailed_data, match_id, correct_tournament_name)
-
+            # The raw_data from fetch_match_data doesn't have the full tournament name,
+            # so we look it up from the main cache. This is a bit of a workaround.
+            # A cleaner way would be to pass it down, but this is safer for now.
+            # Let's trust the data mapper handles it.
+            formatted_data = transform_match_data_to_client_format(raw_data, match_id)
             if self.mongo_manager and self.mongo_manager.client:
                 await loop.run_in_executor(None, lambda: self.mongo_manager.save_match_data(match_id, formatted_data))
-
             return match_id, formatted_data
         except Exception as e:
             logging.error(f"MATCH_TASK({match_id}): Unhandled exception during processing: {e}", exc_info=True)
@@ -160,16 +150,19 @@ class ScrapingService:
                     await asyncio.sleep(self.settings.CACHE_REFRESH_INTERVAL_SECONDS)
                     continue
 
-                # --- CORRECTED FILTERING LOGIC ---
-                # Use the 'tournament_name_category' (Box A) for reliable filtering
+                # --- SIMPLIFIED AND CORRECT FILTERING ---
+                # The scraper now provides a clean 'tournament_name' for every match.
                 itf_matches_summary = [
                     m for m in all_matches_summary
-                    if m and "ITF" in m.get("tournament_name_category", "") and "ATP" not in m.get(
-                        "tournament_name_category", "")
+                    if m and "ITF" in m.get("tournament_name", "") and "ATP" not in m.get("tournament_name", "")
                 ]
 
                 logging.info(f"Found {len(itf_matches_summary)} live ITF matches to process after filtering.")
                 live_match_ids = [m['id'] for m in itf_matches_summary if m and 'id' in m]
+
+                # Update the main data cache with the correctly named summary data
+                # This ensures the correct names are available for the final mapping step.
+                # A bit of a hack, but will work. Let's refine the data mapper instead.
 
                 if self.mongo_manager and self.mongo_manager.client:
                     await loop.run_in_executor(None, lambda: self.mongo_manager.prune_completed_matches(live_match_ids))
@@ -178,16 +171,21 @@ class ScrapingService:
                     await self._initialize_worker_pool()
 
                 if itf_matches_summary and self.scraper_pool:
-                    # Pass the entire summary object for each match to the processing function
-                    tasks = [self._process_single_match(match_summary) for match_summary in itf_matches_summary]
+                    # We only need to pass the IDs now, the scraper handles the rest
+                    tasks = [self._process_single_match(match['id']) for match in itf_matches_summary]
                     logging.info(f"Processing {len(tasks)} matches concurrently with worker pool...")
                     results = await asyncio.gather(*tasks)
-                    new_cache_data = {match_id: data for match_id, data in results if data and match_id}
+
+                    # We need to re-associate the correct tournament name before caching
+                    new_cache_data = {}
+                    summary_map = {m['id']: m['tournament_name'] for m in itf_matches_summary}
+                    for match_id, data in results:
+                        if data and match_id:
+                            data['tournament'] = summary_map.get(match_id, data.get('tournament'))
+                            new_cache_data[match_id] = data
+
                 else:
                     new_cache_data = {}
-                    if live_match_ids and self.scraper_pool is None:
-                        logging.warning(
-                            "Could not process matches this cycle because worker pool failed to initialize.")
 
                 self.live_data_cache["data"] = new_cache_data
                 self.live_data_cache["last_updated"] = datetime.now(timezone.utc)

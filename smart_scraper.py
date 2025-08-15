@@ -129,26 +129,29 @@ class TenipoScraper:
                 logging.warning("Parsed XML root is None. Returning failure status.")
                 return False, []
 
-            # --- THE DEFINITIVE LOGIC FIX ---
-            # Create a flat list of all matches, correctly associating tournament data.
+            # --- THE CORRECT PARSING LOGIC ---
             all_parsed_matches = []
-            # Find all tournament blocks (the <event> tags)
-            tournament_blocks = root.findall("./event")
-            for tournament in tournament_blocks:
-                # Get the full, descriptive name of the tournament. Fall back to category name.
-                tournament_name = tournament.get("name", tournament.get("tournament_name", ""))
 
-                # Find every single <match> tag within this tournament block
-                matches_in_tournament = tournament.findall("./match")
-                for match_element in matches_in_tournament:
-                    # Convert the match XML to a dictionary
-                    match_data = self._xml_to_dict(match_element)
-                    # **Crucially, add the correct tournament name to each match**
-                    match_data['tournament_name'] = tournament_name
+            # Iterate through all direct children of the root to handle both <event> and <match>
+            for element in root:
+                # Case 1: It's a tournament block containing multiple matches
+                if element.tag == 'event':
+                    tournament_name = element.get("name", element.get("tournament_name", ""))
+                    matches_in_tournament = element.findall("./match")
+                    for match_element in matches_in_tournament:
+                        match_data = self._xml_to_dict(match_element)
+                        match_data['tournament_name'] = tournament_name
+                        all_parsed_matches.append(match_data)
+
+                # Case 2: It's a standalone match block at the top level
+                elif element.tag == 'match':
+                    match_data = self._xml_to_dict(element)
+                    if 'tournament_name' not in match_data:
+                        # Use its own `name` attribute if it exists, otherwise `tournament_name`
+                        match_data['tournament_name'] = match_data.get("name", match_data.get("tournament_name", ""))
                     all_parsed_matches.append(match_data)
 
-            logging.info(
-                f"Parsed a total of {len(all_parsed_matches)} matches from {len(tournament_blocks)} tournaments.")
+            logging.info(f"Parsed a total of {len(all_parsed_matches)} matches.")
             return True, all_parsed_matches
 
         except Exception as e:
