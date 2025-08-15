@@ -1,6 +1,7 @@
 import logging
 import pymongo
 from pymongo.errors import ConnectionFailure, OperationFailure
+from typing import List, Dict, Any
 
 import config
 
@@ -66,6 +67,19 @@ class MongoManager:
             logging.error(f"DB: A database operation failed for match ID {match_id}. Error: {e}")
         except Exception as e:
             logging.error(f"DB: An unexpected error occurred while saving match ID {match_id}. Error: {e}")
+
+    def get_all_active_matches(self) -> List[Dict[str, Any]]:
+        """
+        Retrieves all documents from the active 'tenipo' collection.
+        This is used to build the stable API cache.
+        """
+        if not self.db:
+            return []
+        try:
+            return list(self.db["tenipo"].find({}))
+        except OperationFailure as e:
+            logging.error(f"DB: Failed to retrieve active matches for cache rebuild. Error: {e}")
+            return []
 
     def close(self):
         """Closes the database connection."""

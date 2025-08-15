@@ -143,48 +143,41 @@ class ScrapingService:
                 summary_success, all_matches_summary = await loop.run_in_executor(None,
                                                                                   self.main_scraper.get_live_matches_summary)
 
-                if not summary_success:
-                    logging.warning(
-                        "Main scraper failed to get a valid summary. Skipping this poll cycle to prevent data loss.")
-                    await asyncio.sleep(self.settings.CACHE_REFRESH_INTERVAL_SECONDS)
-                    continue
+                if summary_success:
+                    itf_matches_summary = [
+                        m for m in all_matches_summary
+                        if m and "ITF" in m.get("tournament_name", "") and "ATP" not in m.get("tournament_name", "")
+                    ]
+                    logging.info(f"Found {len(itf_matches_summary)} live ITF matches in feed.")
+                    live_match_ids = [m['id'] for m in itf_matches_summary if m and 'id' in m]
 
-                itf_matches_summary = [
-                    m for m in all_matches_summary
-                    if m and "ITF" in m.get("tournament_name", "") and "ATP" not in m.get("tournament_name", "")
-                ]
-                logging.info(f"Found {len(itf_matches_summary)} live ITF matches to process after filtering.")
-                live_match_ids = [m['id'] for m in itf_matches_summary if m and 'id' in m]
+                    if self.scraper_pool is None and live_match_ids:
+                        await self._initialize_worker_pool()
 
-                if self.scraper_pool is None and live_match_ids:
-                    await self._initialize_worker_pool()
-
-                if itf_matches_summary and self.scraper_pool:
-                    tasks = [self._process_single_match(match['id']) for match in itf_matches_summary]
-                    logging.info(f"Processing {len(tasks)} matches concurrently with worker pool...")
-                    results = await asyncio.gather(*tasks)
-
-                    new_cache_data = {}
-                    summary_map = {m['id']: m['tournament_name'] for m in itf_matches_summary}
-                    for match_id, data in results:
-                        if data and match_id:
-                            # We only cache matches that are currently LIVE for the API endpoint
-                            if data.get("score", {}).get("status") == "LIVE":
-                                data['tournament'] = summary_map.get(match_id, data.get('tournament'))
-                                new_cache_data[match_id] = data
+                    if itf_matches_summary and self.scraper_pool:
+                        tasks = [self._process_single_match(match['id']) for match in itf_matches_summary]
+                        logging.info(f"Processing {len(tasks)} matches and updating database...")
+                        await asyncio.gather(*tasks)
                 else:
-                    new_cache_data = {}
+                    logging.warning(
+                        "Main scraper failed to get a valid summary. Skipping scrape phase for this cycle.")
 
-                self.live_data_cache["data"] = new_cache_data
-                self.live_data_cache["last_updated"] = datetime.now(timezone.utc)
-                logging.info(f"BACKGROUND_POLL: Cache updated with {len(new_cache_data)} matches.")
+                # --- STABLE CACHE LOGIC ---
+                # After every cycle (even a failed scrape), rebuild the cache from the database,
+                # which is our stable source of truth. This stops the "blinking" cache.
+                if self.mongo_manager:
+                    active_matches_from_db = await loop.run_in_executor(None, self.mongo_manager.get_all_active_matches)
+                    new_cache_data = {match['_id']: match for match in active_matches_from_db}
+                    self.live_data_cache["data"] = new_cache_data
+                    self.live_data_cache["last_updated"] = datetime.now(timezone.utc)
+                    logging.info(f"BACKGROUND_POLL: Cache rebuilt from DB with {len(new_cache_data)} active matches.")
 
-                if self.stall_monitor:
-                    await self.stall_monitor.check_and_update_all(new_cache_data)
+                    if self.stall_monitor:
+                        await self.stall_monitor.check_and_update_all(new_cache_data)
 
                 # After every successful cycle, run the archiver to clean up completed matches.
                 if self.archiver:
-                    logging.info("BACKGROUND_POLL: Running archiver to clean up completed matches...")
+                    logging.info("BACKGROUND_POLL: Running archiver to clean up completed matches from DB...")
                     await loop.run_in_executor(None, self.archiver.archive_completed_matches)
 
             except Exception as e:
