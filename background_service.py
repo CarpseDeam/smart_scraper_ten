@@ -8,6 +8,7 @@ from smart_scraper import TenipoScraper
 from data_mapper import transform_match_data_to_client_format
 from database import MongoManager
 from monitoring import TelegramNotifier, StallMonitor
+from archiver import MongoArchiver
 
 
 class ScrapingService:
@@ -19,6 +20,7 @@ class ScrapingService:
         self.settings = settings
         self.mongo_manager: MongoManager | None = None
         self.stall_monitor: StallMonitor | None = None
+        self.archiver: MongoArchiver | None = None
         self.polling_task: asyncio.Task | None = None
         self.live_data_cache: Dict = {"data": {}, "last_updated": None}
         self.main_scraper: TenipoScraper | None = None
@@ -45,6 +47,7 @@ class ScrapingService:
             return
 
         self.mongo_manager = MongoManager(self.settings)
+        self.archiver = MongoArchiver(self.mongo_manager)
         telegram_notifier = TelegramNotifier(self.settings)
         self.stall_monitor = StallMonitor(notifier=telegram_notifier, settings=self.settings)
 
@@ -109,15 +112,11 @@ class ScrapingService:
         try:
             worker = await self.scraper_pool.get()
             logging.info(f"MATCH_TASK({match_id}): Worker acquired. Processing...")
-            raw_data = await loop.run_in_executor(None, lambda: worker.fetch_match_data(match_id))
+            raw_data = await loop.run_in_executor(None, lambda: worker.fetch__match_data(match_id))
 
             if not raw_data:
                 return match_id, None
 
-            # The raw_data from fetch_match_data doesn't have the full tournament name,
-            # so we look it up from the main cache. This is a bit of a workaround.
-            # A cleaner way would be to pass it down, but this is safer for now.
-            # Let's trust the data mapper handles it.
             formatted_data = transform_match_data_to_client_format(raw_data, match_id)
             if self.mongo_manager and self.mongo_manager.client:
                 await loop.run_in_executor(None, lambda: self.mongo_manager.save_match_data(match_id, formatted_data))
@@ -150,40 +149,29 @@ class ScrapingService:
                     await asyncio.sleep(self.settings.CACHE_REFRESH_INTERVAL_SECONDS)
                     continue
 
-                # --- SIMPLIFIED AND CORRECT FILTERING ---
-                # The scraper now provides a clean 'tournament_name' for every match.
                 itf_matches_summary = [
                     m for m in all_matches_summary
                     if m and "ITF" in m.get("tournament_name", "") and "ATP" not in m.get("tournament_name", "")
                 ]
-
                 logging.info(f"Found {len(itf_matches_summary)} live ITF matches to process after filtering.")
                 live_match_ids = [m['id'] for m in itf_matches_summary if m and 'id' in m]
-
-                # Update the main data cache with the correctly named summary data
-                # This ensures the correct names are available for the final mapping step.
-                # A bit of a hack, but will work. Let's refine the data mapper instead.
-
-                if self.mongo_manager and self.mongo_manager.client:
-                    await loop.run_in_executor(None, lambda: self.mongo_manager.prune_completed_matches(live_match_ids))
 
                 if self.scraper_pool is None and live_match_ids:
                     await self._initialize_worker_pool()
 
                 if itf_matches_summary and self.scraper_pool:
-                    # We only need to pass the IDs now, the scraper handles the rest
                     tasks = [self._process_single_match(match['id']) for match in itf_matches_summary]
                     logging.info(f"Processing {len(tasks)} matches concurrently with worker pool...")
                     results = await asyncio.gather(*tasks)
 
-                    # We need to re-associate the correct tournament name before caching
                     new_cache_data = {}
                     summary_map = {m['id']: m['tournament_name'] for m in itf_matches_summary}
                     for match_id, data in results:
                         if data and match_id:
-                            data['tournament'] = summary_map.get(match_id, data.get('tournament'))
-                            new_cache_data[match_id] = data
-
+                            # We only cache matches that are currently LIVE for the API endpoint
+                            if data.get("score", {}).get("status") == "LIVE":
+                                data['tournament'] = summary_map.get(match_id, data.get('tournament'))
+                                new_cache_data[match_id] = data
                 else:
                     new_cache_data = {}
 
@@ -193,6 +181,11 @@ class ScrapingService:
 
                 if self.stall_monitor:
                     await self.stall_monitor.check_and_update_all(new_cache_data)
+
+                # After every successful cycle, run the archiver to clean up completed matches.
+                if self.archiver:
+                    logging.info("BACKGROUND_POLL: Running archiver to clean up completed matches...")
+                    await loop.run_in_executor(None, self.archiver.archive_completed_matches)
 
             except Exception as e:
                 logging.error(f"BACKGROUND_POLL: Unhandled error during polling cycle: {e}", exc_info=True)

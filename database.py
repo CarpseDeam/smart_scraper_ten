@@ -18,6 +18,7 @@ class MongoManager:
             self.client.admin.command('ismaster')
             self.db = self.client[settings.MONGO_DB_NAME]
             logging.info("MongoDB connection successful.")
+            self.ensure_indexes()
         except ConnectionFailure as e:
             logging.critical(
                 f"FATAL: Could not connect to MongoDB. Is the service running and the URI correct? Error: {e}")
@@ -25,6 +26,21 @@ class MongoManager:
         except Exception as e:
             logging.critical(f"An unexpected error occurred during MongoDB initialization: {e}")
             self.client = None
+
+    def ensure_indexes(self):
+        """
+        Ensures that the necessary indexes exist in the collections for optimal performance.
+        This is idempotent - it's safe to run multiple times.
+        """
+        if not self.db:
+            return
+        try:
+            logging.info("DB_SETUP: Ensuring database indexes exist...")
+            # Index for the archiver to quickly find completed matches
+            self.db["tenipo"].create_index([("score.status", pymongo.ASCENDING)])
+            logging.info("DB_SETUP: 'score.status' index on 'tenipo' collection is ensured.")
+        except OperationFailure as e:
+            logging.error(f"DB_SETUP: Failed to create indexes. This may impact performance. Error: {e}")
 
     def save_match_data(self, match_id: str, data: dict):
         """
@@ -36,7 +52,6 @@ class MongoManager:
             return
 
         try:
-            # FIX: Changed "matches" to "tenipo" to match your database.
             matches_collection = self.db["tenipo"]
             result = matches_collection.update_one(
                 {"_id": match_id},
@@ -51,30 +66,6 @@ class MongoManager:
             logging.error(f"DB: A database operation failed for match ID {match_id}. Error: {e}")
         except Exception as e:
             logging.error(f"DB: An unexpected error occurred while saving match ID {match_id}. Error: {e}")
-
-    def prune_completed_matches(self, live_match_ids: list[str]):
-        """
-        Deletes matches from the database that are no longer in the live feed.
-        """
-        if not self.client:
-            logging.error("Cannot prune matches: MongoDB client is not connected.")
-            return
-        try:
-            # FIX: Changed "matches" to "tenipo" to match your database.
-            matches_collection = self.db["tenipo"]
-            stored_match_ids_cursor = matches_collection.find({}, {"_id": 1})
-            stored_match_ids = {doc["_id"] for doc in stored_match_ids_cursor}
-            live_ids_set = set(live_match_ids)
-            ids_to_delete = list(stored_match_ids - live_ids_set)
-
-            if not ids_to_delete:
-                return
-
-            logging.info(f"DB_PRUNE: Found {len(ids_to_delete)} completed matches to prune from 'tenipo': {ids_to_delete}")
-            result = matches_collection.delete_many({"_id": {"$in": ids_to_delete}})
-            logging.info(f"DB_PRUNE: Successfully deleted {result.deleted_count} documents from 'tenipo'.")
-        except Exception as e:
-            logging.error(f"DB_PRUNE: An unexpected error occurred during pruning. Error: {e}")
 
     def close(self):
         """Closes the database connection."""
