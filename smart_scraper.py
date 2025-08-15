@@ -10,7 +10,8 @@ from typing import List, Dict, Any
 import config
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
-from selenium.common.exceptions import WebDriverException, TimeoutException, NoSuchElementException
+from selenium.common.exceptions import WebDriverException, TimeoutException, NoSuchElementException, \
+    StaleElementReferenceException
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
@@ -200,26 +201,74 @@ class TenipoScraper:
         return result
 
     def _scrape_html_pbp(self) -> List[Dict[str, Any]]:
-        if self.driver is None: return []
-        pbp_data = []
+        if self.driver is None:
+            return []
+
         try:
-            pbp_button = WebDriverWait(self.driver, 10).until(EC.element_to_be_clickable((By.ID, "buttonhistoryall")))
+            pbp_button = WebDriverWait(self.driver, 10).until(
+                EC.element_to_be_clickable((By.ID, "buttonhistoryall"))
+            )
             self.driver.execute_script("arguments[0].click();", pbp_button)
-            WebDriverWait(self.driver, 10).until(EC.presence_of_element_located((By.CLASS_NAME, "ohlavicka1")))
-            game_headers = self.driver.find_elements(By.CLASS_NAME, "ohlavicka1")
-            game_point_blocks = self.driver.find_elements(By.CLASS_NAME, "sethistory")
-            for header, block in zip(game_headers, game_point_blocks):
+            WebDriverWait(self.driver, 10).until(
+                EC.presence_of_element_located((By.CLASS_NAME, "ohlavicka1"))
+            )
+
+            for attempt in range(3):
+                pbp_data = []
                 try:
-                    score = header.find_element(By.CLASS_NAME, "ohlavicka3").text.strip()
-                    points = [p.text.strip().replace('\n', ' ') for p in
-                              block.find_elements(By.CLASS_NAME, "pointlogg")]
-                    pbp_data.append({"game_header": score, "points_log": points})
-                except NoSuchElementException:
-                    continue
-            return pbp_data
+                    game_headers = self.driver.find_elements(By.CLASS_NAME, "ohlavicka1")
+                    game_point_blocks = self.driver.find_elements(By.CLASS_NAME, "sethistory")
+
+                    for header, block in zip(game_headers, game_point_blocks):
+                        try:
+                            score = header.find_element(By.CLASS_NAME, "ohlavicka3").text.strip()
+                            points_elements = block.find_elements(By.CLASS_NAME, "pointlogg")
+                            points = [p.text.strip().replace('\n', ' ') for p in points_elements]
+                            pbp_data.append({"game_header": score, "points_log": points})
+                        except NoSuchElementException:
+                            logging.debug("Skipping a PBP block that was missing expected elements.")
+                            continue
+
+                    return pbp_data
+
+                except StaleElementReferenceException:
+                    logging.warning(
+                        f"PBP scrape attempt {attempt + 1}/3 failed due to StaleElementReferenceException. Retrying...")
+                    if attempt < 2:
+                        time.sleep(0.5)
+                    else:
+                        logging.error("PBP scraping failed after 3 retries due to persistent staleness.")
+                        return []
         except TimeoutException:
-            logging.info(f"No point-by-point data available or button not found for this match.")
+            logging.info("No point-by-point data available or button not found for this match.")
             return []
         except Exception as e:
-            logging.error(f"PBP scraping error: {e}", exc_info=True)
+            logging.error(f"An unexpected error occurred during PBP scraping: {e}", exc_info=True)
             return []
+
+        return []
+
+    def investigate_data_sources(self, match_id: str):
+        """
+        A debugging method to find new data sources for a given match.
+        """
+        if not self.driver:
+            logging.error("Cannot investigate, driver not started.")
+            return []
+
+        # Navigate to the page
+        match_page_url = f"https://tenipo.com/match/-/{match_id}"
+        self.driver.get(match_page_url)
+
+        time.sleep(10)  # Wait for requests to be made
+
+        script = "return Object.keys(window.interceptedResponses || {});"
+        urls = self.driver.execute_script(script)
+
+        logging.info(f"--- Investigation for Match ID {match_id} ---")
+        logging.info(f"Found {len(urls)} intercepted URLs:")
+        for url in urls:
+            logging.info(f"  - {url}")
+        logging.info("--- End of Investigation ---")
+
+        return urls
