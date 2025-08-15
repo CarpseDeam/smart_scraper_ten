@@ -129,12 +129,8 @@ class TenipoScraper:
                 logging.warning("Parsed XML root is None. Returning failure status.")
                 return False, []
 
-            # --- THE CORRECT PARSING LOGIC ---
             all_parsed_matches = []
-
-            # Iterate through all direct children of the root to handle both <event> and <match>
             for element in root:
-                # Case 1: It's a tournament block containing multiple matches
                 if element.tag == 'event':
                     tournament_name = element.get("name", element.get("tournament_name", ""))
                     matches_in_tournament = element.findall("./match")
@@ -143,15 +139,22 @@ class TenipoScraper:
                         match_data['tournament_name'] = tournament_name
                         all_parsed_matches.append(match_data)
 
-                # Case 2: It's a standalone match block at the top level
                 elif element.tag == 'match':
                     match_data = self._xml_to_dict(element)
                     if 'tournament_name' not in match_data:
-                        # Use its own `name` attribute if it exists, otherwise `tournament_name`
                         match_data['tournament_name'] = match_data.get("name", match_data.get("tournament_name", ""))
                     all_parsed_matches.append(match_data)
 
             logging.info(f"Parsed a total of {len(all_parsed_matches)} matches.")
+
+            # --- THE SANITY CHECK ---
+            # If parsing was successful but we found 0 matches, it's likely a temporary glitch.
+            # Treat this as a failure to prevent the database from being wiped.
+            if not all_parsed_matches:
+                logging.warning(
+                    "SANITY CHECK FAILED: Scraper parsed 0 matches. Forcing a failure status to protect DB.")
+                return False, []
+
             return True, all_parsed_matches
 
         except Exception as e:
