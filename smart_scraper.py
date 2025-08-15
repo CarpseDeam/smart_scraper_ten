@@ -131,29 +131,34 @@ class TenipoScraper:
                 return False, []
 
             all_parsed_matches = []
+            current_tournament_name = "Unknown"
+
+            # This is the stateful loop that fixes the entire problem.
+            # It remembers the last tournament header it saw.
             for element in root:
                 if element.tag == 'event':
-                    tournament_name = element.get("name", element.get("tournament_name", ""))
-                    matches_in_tournament = element.findall("./match")
-                    for match_element in matches_in_tournament:
+                    # When we see a tournament header, we update our memory.
+                    name_parts = [element.get("name", ""), element.get("tournament_name", ""),
+                                  element.get("category", "")]
+                    current_tournament_name = " ".join(part for part in name_parts if part).strip()
+                    # An event can also contain matches as children. Handle this case too.
+                    matches_in_event = element.findall("./match")
+                    for match_element in matches_in_event:
                         match_data = self._xml_to_dict(match_element)
-                        match_data['tournament_name'] = tournament_name
+                        match_data['tournament_name'] = current_tournament_name
                         all_parsed_matches.append(match_data)
 
                 elif element.tag == 'match':
+                    # When we see a match, we assign it the tournament name we are remembering.
                     match_data = self._xml_to_dict(element)
-                    if 'tournament_name' not in match_data:
-                        match_data['tournament_name'] = match_data.get("name", match_data.get("tournament_name", ""))
+                    match_data['tournament_name'] = current_tournament_name
                     all_parsed_matches.append(match_data)
 
-            logging.info(f"Parsed a total of {len(all_parsed_matches)} matches.")
+            logging.info(f"Parsed a total of {len(all_parsed_matches)} matches from summary.")
 
-            # --- THE SANITY CHECK ---
-            # If parsing was successful but we found 0 matches, it's likely a temporary glitch.
-            # Treat this as a failure to prevent the database from being wiped.
             if not all_parsed_matches:
                 logging.warning(
-                    "SANITY CHECK FAILED: Scraper parsed 0 matches. Forcing a failure status to protect DB.")
+                    "SANITY CHECK FAILED: Scraper parsed 0 matches from summary. Forcing a failure status to protect DB.")
                 return False, []
 
             return True, all_parsed_matches
@@ -177,7 +182,7 @@ class TenipoScraper:
 
             parser = ET.XMLParser(recover=True, encoding='utf-8')
             main_root = ET.fromstring(main_xml_str.encode('utf-8'), parser=parser)
-            combined_data = self._xml_to_dict(main_root)
+            combined_data = {"match": self._xml_to_dict(main_root)}
 
             pbp_html_data = self._scrape_html_pbp()
             combined_data['point_by_point_html'] = pbp_html_data
