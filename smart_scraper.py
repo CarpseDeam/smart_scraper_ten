@@ -129,26 +129,26 @@ class TenipoScraper:
                 logging.warning("Parsed XML root is None. Returning failure status.")
                 return False, []
 
-            # --- THE NEW LOGIC ---
-            # Create a flat list of all matches from all tournaments.
+            # --- THE DEFINITIVE LOGIC FIX ---
+            # Create a flat list of all matches, correctly associating tournament data.
             all_parsed_matches = []
-            tournaments = root.findall("./event")
-            for tournament_element in tournaments:
-                # Extract tournament-level info (Box A for category, Box B for full name)
-                tournament_category = tournament_element.get("tournament_name", "")
-                full_tournament_name = tournament_element.get("name", tournament_category)
+            # Find all tournament blocks (the <event> tags)
+            tournament_blocks = root.findall("./event")
+            for tournament in tournament_blocks:
+                # Get the full, descriptive name of the tournament. Fall back to category name.
+                tournament_name = tournament.get("name", tournament.get("tournament_name", ""))
 
-                # Find all matches within this tournament
-                matches_in_tournament = tournament_element.findall("./match")
+                # Find every single <match> tag within this tournament block
+                matches_in_tournament = tournament.findall("./match")
                 for match_element in matches_in_tournament:
-                    # Convert match XML element to dictionary
+                    # Convert the match XML to a dictionary
                     match_data = self._xml_to_dict(match_element)
-                    # Add the parent tournament's info to the match data
-                    match_data['tournament_name_category'] = tournament_category  # For filtering
-                    match_data['tournament_name_full'] = full_tournament_name  # For display
+                    # **Crucially, add the correct tournament name to each match**
+                    match_data['tournament_name'] = tournament_name
                     all_parsed_matches.append(match_data)
 
-            logging.info(f"Parsed a total of {len(all_parsed_matches)} matches from {len(tournaments)} tournaments.")
+            logging.info(
+                f"Parsed a total of {len(all_parsed_matches)} matches from {len(tournament_blocks)} tournaments.")
             return True, all_parsed_matches
 
         except Exception as e:

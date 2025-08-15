@@ -112,11 +112,8 @@ def _parse_stats_string(stats_str: str) -> list:
     ]
 
 
-def transform_match_data_to_client_format(
-    raw_data: dict,
-    match_id: str,
-    correct_tournament_name: str
-) -> dict:
+# This function is now much simpler. It no longer needs the "correct_tournament_name" argument.
+def transform_match_data_to_client_format(raw_data: dict, match_id: str) -> dict:
     if "match" not in raw_data:
         logging.warning("transform_match_data called with invalid data format.")
         return {}
@@ -131,9 +128,8 @@ def transform_match_data_to_client_format(
 
     return {
         "match_url": f"https://tenipo.com/match/-/{match_id}",
-        # --- THE FIX for the wrong name ---
-        # We use the correct name passed in from the summary, ignoring the bad data in this file.
-        "tournament": correct_tournament_name,
+        # The scraper now provides the correct, full name in this field. No more guesswork needed.
+        "tournament": _safe_get_from_dict(match_info, "tournament_name"),
         "round": _parse_round_info(_safe_get_from_dict(match_info, "round", "")).get("round_name"),
         "timePolled": datetime.now(timezone.utc).isoformat(),
         "players": [p1_info, p2_info],
