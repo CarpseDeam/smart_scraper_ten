@@ -33,7 +33,7 @@ class MongoManager:
         Ensures that the necessary indexes exist in the collections for optimal performance.
         This is idempotent - it's safe to run multiple times.
         """
-        if not self.db:
+        if self.db is None:
             return
         try:
             logging.info("DB_SETUP: Ensuring database indexes exist...")
@@ -48,7 +48,7 @@ class MongoManager:
         Saves match data to the database using an "upsert" operation.
         This updates the document if it exists, or inserts it if it's new.
         """
-        if not self.client:
+        if self.client is None:
             logging.error("Cannot save match data: MongoDB client is not connected.")
             return
 
@@ -73,7 +73,7 @@ class MongoManager:
         Retrieves all documents from the active 'tenipo' collection.
         This is used to build the stable API cache.
         """
-        if not self.db:
+        if self.db is None:
             return []
         try:
             return list(self.db["tenipo"].find({}))

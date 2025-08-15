@@ -47,12 +47,15 @@ class ScrapingService:
             return
 
         self.mongo_manager = MongoManager(self.settings)
-        self.archiver = MongoArchiver(self.mongo_manager)
-        telegram_notifier = TelegramNotifier(self.settings)
-        self.stall_monitor = StallMonitor(notifier=telegram_notifier, settings=self.settings)
+        if self.mongo_manager.client:
+            self.archiver = MongoArchiver(self.mongo_manager)
+            telegram_notifier = TelegramNotifier(self.settings)
+            self.stall_monitor = StallMonitor(notifier=telegram_notifier, settings=self.settings)
+            self.polling_task = asyncio.create_task(self._poll_for_live_data())
+            logging.info("ScrapingService started, polling task created.")
+        else:
+            logging.critical("ScrapingService did not start polling task due to MongoDB connection failure.")
 
-        self.polling_task = asyncio.create_task(self._poll_for_live_data())
-        logging.info("ScrapingService started, polling task created.")
 
     async def stop(self):
         """Gracefully stops all background tasks and closes resources."""
