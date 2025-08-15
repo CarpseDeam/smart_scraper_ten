@@ -12,8 +12,8 @@ class MongoArchiver:
     """
 
     def __init__(self, mongo_manager: MongoManager):
-        if not mongo_manager or not mongo_manager.db:
-            raise ValueError("A valid MongoManager instance is required.")
+        if mongo_manager is None or mongo_manager.db is None:
+            raise ValueError("A valid and connected MongoManager instance is required.")
         self.db = mongo_manager.db
         self.active_collection = self.db["tenipo"]
         self.history_collection = self.db["tenipo_history"]

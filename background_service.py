@@ -112,7 +112,7 @@ class ScrapingService:
         try:
             worker = await self.scraper_pool.get()
             logging.info(f"MATCH_TASK({match_id}): Worker acquired. Processing...")
-            raw_data = await loop.run_in_executor(None, lambda: worker.fetch__match_data(match_id))
+            raw_data = await loop.run_in_executor(None, lambda: worker.fetch_match_data(match_id))
 
             if not raw_data:
                 return match_id, None
