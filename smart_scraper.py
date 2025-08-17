@@ -129,11 +129,9 @@ class TenipoScraper:
                 logging.warning("Could not find change2.xml via interception. Returning failure status.")
                 return False, []
 
-            # --- DIAGNOSTIC STEP: DUMP THE RAW XML TO LOGS ---
             logging.info("--- RAW change2.xml CONTENT START ---")
             logging.info(decoded_xml_string.strip())
             logging.info("--- RAW change2.xml CONTENT END ---")
-            # --- END DIAGNOSTIC STEP ---
 
             parser = ET.XMLParser(recover=True, encoding='utf-8')
             root = ET.fromstring(decoded_xml_string.encode('utf-8'), parser=parser)
@@ -141,25 +139,27 @@ class TenipoScraper:
                 logging.warning("Parsed XML root is None. Returning failure status.")
                 return False, []
 
-            # --- Definitive Flat XML Parser ---
-            # This parser correctly handles the observed flat XML structure where each
-            # <match> element is self-contained and includes a 'tournament_name' attribute.
             all_parsed_matches = []
+            logging.info("--- Parsing Matches from Summary Feed ---")
             for match_element in root.xpath('//match'):
-                # The existing _xml_to_dict helper correctly converts all element attributes to a dictionary.
                 match_data = self._xml_to_dict(match_element)
 
-                # The summary feed provides the best tournament name, so we ensure it's passed along.
-                # The key from the XML is 'tournament_name', which we will use directly.
+                # --- NEW DIAGNOSTIC LOGGING ---
+                p1 = match_data.get('player1', 'P1_Unknown')
+                p2 = match_data.get('player2', 'P2_Unknown')
+                tourn = match_data.get('tournament_name', 'Tourn_Unknown')
+                match_id = match_data.get('id', 'ID_Unknown')
+                logging.info(f"PARSED_MATCH: ID={match_id}, Players='{p1}' vs '{p2}', Tournament='{tourn}'")
+                # --- END NEW LOGGING ---
+
                 if 'tournament_name' in match_data:
                     all_parsed_matches.append(match_data)
                 else:
                     logging.warning(f"Match element found without a 'tournament_name' attribute. Skipping. Data: {match_data}")
+            logging.info("--- End of Match Parsing ---")
 
+            logging.info(f"Successfully parsed a total of {len(all_parsed_matches)} matches from the flat summary feed.")
 
-            logging.info(f"Correctly parsed a total of {len(all_parsed_matches)} matches from the flat summary feed.")
-
-            # It's okay if the feed is empty, that's not a failure.
             if not all_parsed_matches:
                 logging.warning(
                     "Scraper parsed 0 matches from summary. The feed might be momentarily empty.")

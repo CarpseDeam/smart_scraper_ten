@@ -21,12 +21,11 @@ class MongoArchiver:
 
     def archive_completed_matches(self):
         """
-        Finds matches marked as "COMPLETED" in the active collection,
-        copies them to the history collection, and then removes them from the
-        active collection in a safe, transaction-like manner.
+        Finds completed matches, copies them to a history collection, and then
+        deletes ONLY the successfully copied matches from the active collection.
+        This process is designed to prevent data loss in case of partial failures.
         """
         try:
-            # Find all documents in the active collection that are completed.
             completed_matches = list(self.active_collection.find({"score.status": "COMPLETED"}))
 
             if not completed_matches:
@@ -34,33 +33,52 @@ class MongoArchiver:
                 return
 
             logging.info(f"ARCHIVER: Found {len(completed_matches)} completed matches to archive.")
+            original_ids = {match['_id'] for match in completed_matches}
+            ids_to_delete = set()
 
-            # Step 1: Copy the documents to the history collection.
+            # Step 1: Attempt to copy all completed matches to the history collection.
             try:
                 self.history_collection.insert_many(completed_matches, ordered=False)
-                logging.info(f"ARCHIVER: Successfully inserted {len(completed_matches)} matches into 'tenipo_history'.")
+                # If this succeeds without error, all matches were inserted.
+                ids_to_delete = original_ids
+                logging.info(
+                    f"ARCHIVER: Successfully inserted all {len(completed_matches)} matches into 'tenipo_history'.")
+
             except BulkWriteError as bwe:
-                # This can happen if a match was already archived but not yet deleted (e.g., from a previous failed run).
-                # It's safe to ignore duplicate key errors and proceed with deletion for the ones that did insert.
-                successful_ids = [doc['_id'] for doc in completed_matches if not any(err['op']['_id'] == doc['_id'] for err in bwe.details['writeErrors'])]
-                logging.warning(f"ARCHIVER: Encountered duplicate keys on insert, but will proceed with {len(successful_ids)} non-duplicates.")
-                if not successful_ids:
-                    # If all were duplicates, we might as well try to delete all found matches
-                    successful_ids = [doc['_id'] for doc in completed_matches]
+                # This occurs if some documents failed to insert.
+                # We can safely delete documents that were either successfully inserted or failed due to a "duplicate key" error (code 11000).
+
+                # Find IDs that failed for reasons OTHER than being a duplicate.
+                # These are the ones we do NOT want to delete.
+                unsafe_ids = {
+                    err['op']['_id'] for err in bwe.details['writeErrors'] if err['code'] != 11000
+                }
+
+                # Safe IDs are all original IDs minus the ones that failed for other reasons.
+                ids_to_delete = original_ids - unsafe_ids
+
+                num_duplicates = sum(1 for err in bwe.details['writeErrors'] if err['code'] == 11000)
+                logging.warning(
+                    f"ARCHIVER: Bulk write to history had errors. {num_duplicates} were duplicates. {len(ids_to_delete)} matches are safe to delete.")
+
             except Exception as e:
-                logging.error(f"ARCHIVER: Failed to insert documents into history. Aborting archive cycle. Error: {e}")
+                # For any other unexpected error during insertion, we abort the entire cycle.
+                # We will not delete anything to be safe.
+                logging.error(
+                    f"ARCHIVER: Failed to insert documents into history. Aborting archive cycle to prevent data loss. Error: {e}")
                 return
 
-            # Step 2: If the copy was successful, delete the documents from the active collection.
-            ids_to_delete = [match["_id"] for match in completed_matches]
+            # Step 2: If we have a list of safe IDs, delete them from the active collection.
             if not ids_to_delete:
+                logging.info("ARCHIVER: No matches were cleared from the active collection this cycle.")
                 return
 
-            delete_result = self.active_collection.delete_many({"_id": {"$in": ids_to_delete}})
+            delete_result = self.active_collection.delete_many({"_id": {"$in": list(ids_to_delete)}})
             logging.info(
                 f"ARCHIVER: Cleaned up {delete_result.deleted_count} matches from the active 'tenipo' collection.")
 
         except OperationFailure as e:
             logging.error(f"ARCHIVER: A database operation failed. Error: {e}")
         except Exception as e:
-            logging.error(f"ARCHIVER: An unexpected error occurred during the archiving process. Error: {e}", exc_info=True)
+            logging.error(f"ARCHIVER: An unexpected error occurred during the archiving process. Error: {e}",
+                          exc_info=True)
