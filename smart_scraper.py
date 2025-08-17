@@ -132,6 +132,12 @@ class TenipoScraper:
                 logging.warning("Could not find change2.xml via interception. Returning failure status.")
                 return False, []
 
+            # --- DIAGNOSTIC STEP: DUMP THE RAW XML TO LOGS ---
+            logging.info("--- RAW change2.xml CONTENT START ---")
+            logging.info(decoded_xml_string.strip())
+            logging.info("--- RAW change2.xml CONTENT END ---")
+            # --- END DIAGNOSTIC STEP ---
+
             parser = ET.XMLParser(recover=True, encoding='utf-8')
             root = ET.fromstring(decoded_xml_string.encode('utf-8'), parser=parser)
             if root is None:
