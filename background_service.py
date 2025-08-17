@@ -1,3 +1,4 @@
+# background_service.py
 import logging
 import asyncio
 from datetime import datetime, timezone
@@ -121,19 +122,30 @@ class ScrapingService:
             raw_data = await loop.run_in_executor(None, lambda: worker.fetch_match_data(match_id))
 
             if not raw_data:
+                logging.warning(f"MATCH_TASK({match_id}): Scraper returned no raw data. Aborting processing for this match.")
                 return match_id, None
 
             # Pass the correct tournament name from the summary feed to the mapper.
             # This prevents it from being overwritten by less complete data from the match-specific XML.
             formatted_data = transform_match_data_to_client_format(raw_data, match_id, tournament_name)
 
-            # Final check to ensure we only save ITF matches
-            if "ITF" in formatted_data.get("tournament", "") and "ATP" not in formatted_data.get("tournament", ""):
+            if not formatted_data:
+                logging.warning(f"MATCH_TASK({match_id}): Data mapper returned an empty dictionary. Aborting processing for this match.")
+                return match_id, None
+
+            # Final, case-insensitive check to ensure we only save ITF matches
+            tournament_title = formatted_data.get("tournament", "")
+            is_itf_match = "itf" in tournament_title.lower()
+            is_not_atp_match = "atp" not in tournament_title.lower()
+
+            if is_itf_match and is_not_atp_match:
                 if self.mongo_manager and self.mongo_manager.client:
                     await loop.run_in_executor(None,
                                                lambda: self.mongo_manager.save_match_data(match_id, formatted_data))
                 return match_id, formatted_data
             else:
+                logging.info(
+                    f"MATCH_TASK({match_id}): Match skipped by filter. Tournament: '{tournament_title}'. [is_itf={is_itf_match}, is_not_atp={is_not_atp_match}]")
                 return match_id, None
 
         except Exception as e:
