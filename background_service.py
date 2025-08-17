@@ -128,14 +128,12 @@ class ScrapingService:
             formatted_data = transform_match_data_to_client_format(raw_data, match_id, tournament_name)
 
             # Final check to ensure we only save ITF matches
-            if "ITF" in tournament_name and "ATP" not in tournament_name:
+            if "ITF" in formatted_data.get("tournament", "") and "ATP" not in formatted_data.get("tournament", ""):
                 if self.mongo_manager and self.mongo_manager.client:
                     await loop.run_in_executor(None,
                                                lambda: self.mongo_manager.save_match_data(match_id, formatted_data))
                 return match_id, formatted_data
             else:
-                logging.info(
-                    f"MATCH_TASK({match_id}): Skipping non-ITF match with final tournament name '{tournament_name}'.")
                 return match_id, None
 
         except Exception as e:
@@ -161,19 +159,17 @@ class ScrapingService:
                                                                                   self.main_scraper.get_live_matches_summary)
 
                 if summary_success:
-                    itf_matches_summary = [
-                        m for m in all_matches_summary
-                        if m and "ITF" in m.get("tournament_name", "") and "ATP" not in m.get("tournament_name", "")
-                    ]
-                    logging.info(f"Found {len(itf_matches_summary)} potential ITF matches in feed.")
+                    logging.info(
+                        f"Found {len(all_matches_summary)} total matches in feed. Processing all for details...")
 
-                    if self.scraper_pool is None and itf_matches_summary:
+                    if self.scraper_pool is None and all_matches_summary:
                         await self._initialize_worker_pool()
 
-                    if itf_matches_summary and self.scraper_pool:
-                        # Create tasks with both the match ID and the correct tournament name from the summary.
+                    if all_matches_summary and self.scraper_pool:
+                        # Create tasks for ALL matches found in the summary. The filtering happens
+                        # inside the worker after we have the most complete data.
                         tasks = [self._process_single_match(match['id'], match['tournament_name']) for match in
-                                 itf_matches_summary]
+                                 all_matches_summary if match and 'id' in match and 'tournament_name' in match]
                         logging.info(f"Processing {len(tasks)} matches and updating database...")
                         await asyncio.gather(*tasks)
                 else:
