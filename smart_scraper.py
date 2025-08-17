@@ -131,36 +131,59 @@ class TenipoScraper:
                 logging.warning("Parsed XML root is None. Returning failure status.")
                 return False, []
 
-            # --- Two-Pass Parsing Logic ---
+            # --- Hybrid Parsing Logic ---
             tournaments_by_id = {}
-            all_match_elements = []
 
-            # Pass 1: Gather all tournaments and matches separately.
-            for element in root.xpath('//event | //match'):
+            # Pass 1: Greedily build a map of every event_id to its name.
+            # This handles cases where matches appear before their event header.
+            for event_element in root.xpath('//event'):
+                event_id = event_element.get("id")
+                if not event_id:
+                    continue
+                name_parts = [event_element.get("name", ""), event_element.get("tournament_name", ""),
+                              event_element.get("category", "")]
+                tournament_name = " ".join(part for part in name_parts if part).strip()
+                if tournament_name:
+                    tournaments_by_id[event_id] = tournament_name
+
+            # Pass 2: Iterate through the tree, maintaining state but prioritizing the ID map.
+            all_parsed_matches = []
+            current_tournament_name = "Unknown"  # For stateful fallback
+
+            for element in root:  # Iterate through top-level elements to preserve order
                 if element.tag == 'event':
-                    event_id = element.get("id")
-                    if not event_id:
-                        continue
+                    # Update state for any subsequent sibling matches
                     name_parts = [element.get("name", ""), element.get("tournament_name", ""),
                                   element.get("category", "")]
-                    tournament_name = " ".join(part for part in name_parts if part).strip()
-                    if tournament_name:
-                        tournaments_by_id[event_id] = tournament_name
+                    # Only update if a valid name is found
+                    current_tournament_name = " ".join(
+                        part for part in name_parts if part).strip() or current_tournament_name
+
+                    # Process matches that are CHILDREN of this event
+                    for match_element in element.xpath('./match'):
+                        match_data = self._xml_to_dict(match_element)
+                        # Here, we can be certain of the tournament name from the parent.
+                        match_data['tournament_name'] = current_tournament_name
+                        all_parsed_matches.append(match_data)
 
                 elif element.tag == 'match':
-                    all_match_elements.append(element)
+                    # Process matches that are SIBLINGS of events
+                    match_data = self._xml_to_dict(element)
+                    event_id = match_data.get("event_id")
 
-            # Pass 2: Assemble matches with their correct tournament names.
-            all_parsed_matches = []
-            for match_element in all_match_elements:
-                match_data = self._xml_to_dict(match_element)
-                event_id = match_data.get("event_id")
+                    # Priority 1: Try to find name from our pre-built map (most reliable)
+                    tournament_name_from_map = tournaments_by_id.get(event_id)
 
-                # Look up the tournament name from our map. Default to "Unknown" if not found.
-                tournament_name = tournaments_by_id.get(event_id, "Unknown")
-                match_data['tournament_name'] = tournament_name
+                    if tournament_name_from_map:
+                        match_data['tournament_name'] = tournament_name_from_map
+                    else:
+                        # Priority 2: Fallback to the last seen tournament name (stateful)
+                        match_data['tournament_name'] = current_tournament_name
+                        if event_id:
+                            logging.warning(
+                                f"Match {match_data.get('id')} has event_id {event_id} but it was not found in the tournament map. Falling back to stateful name '{current_tournament_name}'.")
 
-                all_parsed_matches.append(match_data)
+                    all_parsed_matches.append(match_data)
 
             logging.info(f"Parsed a total of {len(all_parsed_matches)} matches from summary.")
 
