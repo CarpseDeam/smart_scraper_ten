@@ -79,28 +79,74 @@ class TenipoScraper:
             except OSError as e:
                 logging.error(f"Error cleaning up profile {self.profile_path}: {e}")
 
-    def _get_all_intercepted_xml_bodies(self, timeout: int = 10) -> List[str]:
-        """Gets the decoded bodies of ALL captured XML responses."""
-        end_time = time.monotonic() + timeout
-        bodies = []
+    def _get_intercepted_xml_body(self, url_pattern: str, timeout: int = 15) -> str | None:
+        """
+        Gets a SINGLE decoded/plain XML body matching a URL pattern.
+        This is used for fetching specific match files.
+        """
+        get_single_script = f"""
+            const url = Object.keys(window.interceptedResponses || {{}}).find(k => k.includes('{url_pattern}'));
+            if (!url) return null;
 
-        # Give the page a few seconds to make all its calls
-        time.sleep(5)
+            const body = window.interceptedResponses[url];
+            delete window.interceptedResponses[url]; // Consume it
+
+            try {{
+                // Attempt to decode using the site's function
+                return janko(body);
+            }} catch (e) {{
+                // If it fails, it might be plain XML. Check if it looks valid.
+                if (typeof body === 'string' && body.trim().startsWith('<')) {{
+                    return body;
+                }}
+            }}
+            return null; // Return null if it's not decodable and not plain XML
+        """
+        end_time = time.monotonic() + timeout
+        while time.monotonic() < end_time:
+            try:
+                result = self.driver.execute_script(get_single_script)
+                if result:
+                    logging.info(f"INTERCEPT: Successfully retrieved and processed data for '{url_pattern}'.")
+                    return result
+            except WebDriverException as e:
+                logging.warning(f"Could not execute script, browser may be navigating. Retrying... Error: {e}")
+            time.sleep(0.25)
+
+        logging.error(f"INTERCEPT TIMEOUT: Did not intercept a response for '{url_pattern}' after {timeout} seconds.")
+        return None
+
+    def _get_all_intercepted_xml_bodies(self, wait_time: int = 5) -> List[str]:
+        """
+        Gets the decoded/plain bodies of ALL captured XML responses.
+        This is used for the main summary feed.
+        """
+        time.sleep(wait_time)  # Allow time for all asynchronous feeds to load
 
         get_all_script = """
             const responses = window.interceptedResponses || {};
             const bodies = Object.values(responses);
+            const processedBodies = [];
             window.interceptedResponses = {}; // Clear after reading
-            return bodies;
+
+            for (const body of bodies) {
+                try {
+                    // Attempt to decode using the site's function
+                    const decoded = janko(body);
+                    processedBodies.push(decoded);
+                } catch (e) {
+                    // If decoding fails, it might be plain XML. Check if it looks valid.
+                    if (typeof body === 'string' && body.trim().startsWith('<')) {
+                        processedBodies.push(body);
+                    }
+                }
+            }
+            return processedBodies;
         """
         try:
-            raw_bodies = self.driver.execute_script(get_all_script)
-            for body in raw_bodies:
-                decoded_body = self.driver.execute_script("return janko(arguments[0]);", body)
-                if decoded_body:
-                    bodies.append(decoded_body)
-            logging.info(f"INTERCEPT: Successfully retrieved and decoded {len(bodies)} XML feeds.")
-            return bodies
+            results = self.driver.execute_script(get_all_script)
+            logging.info(f"INTERCEPT: Successfully retrieved and processed {len(results)} XML feeds.")
+            return results
         except WebDriverException as e:
             logging.error(f"Could not execute script to get all XML bodies. Error: {e}")
             return []
@@ -121,17 +167,14 @@ class TenipoScraper:
         if self.driver is None:
             return False, []
         try:
-            self._clear_captured_responses()
             self.driver.get(str(self.settings.LIVESCORE_PAGE_URL))
 
-            # --- Step 1: Discover and retrieve all available XML feeds ---
-            all_xml_bodies = self._get_all_intercepted_xml_bodies(timeout=15)
+            all_xml_bodies = self._get_all_intercepted_xml_bodies()
 
             if not all_xml_bodies:
                 logging.warning("DISCOVERY: No XML data feeds were intercepted. The page might be empty or changed.")
                 return True, []
 
-            # --- Step 2: Consolidate all matches from all feeds ---
             all_parsed_matches = []
             parser = ET.XMLParser(recover=True, encoding='utf-8')
 
@@ -148,8 +191,6 @@ class TenipoScraper:
                         matches_in_feed += 1
                 logging.info(f"CONSOLIDATE: Parsed {matches_in_feed} matches from feed #{i + 1}.")
 
-            # --- Step 3: Deduplicate and Finalize ---
-            # It's possible different feeds could contain the same match.
             final_matches_map = {match['id']: match for match in all_parsed_matches}
             final_match_list = list(final_matches_map.values())
 
@@ -166,21 +207,20 @@ class TenipoScraper:
             return False, []
 
     def fetch_match_data(self, match_id: str) -> Dict[str, Any]:
+        """Fetches and processes data for a single, specific match."""
         if self.driver is None: return {}
         match_page_url = f"https://tenipo.com/match/-/{match_id}"
         logging.info(f"FETCHING data for match ID: {match_id}")
         try:
-            self._clear_captured_responses()
             self.driver.get(match_page_url)
 
-            # We only need the one specific match xml here
-            main_xml_str = self._get_all_intercepted_xml_bodies(timeout=10)
+            main_xml_str = self._get_intercepted_xml_body(f"match{match_id}.xml", timeout=15)
             if not main_xml_str:
                 logging.error(f"Failed to get main match data for {match_id} via interception.")
                 return {}
 
             parser = ET.XMLParser(recover=True, encoding='utf-8')
-            main_root = ET.fromstring(main_xml_str[0].encode('utf-8'), parser=parser)
+            main_root = ET.fromstring(main_xml_str.encode('utf-8'), parser=parser)
             combined_data = {"match": self._xml_to_dict(main_root)}
 
             pbp_html_data = self._scrape_html_pbp()
