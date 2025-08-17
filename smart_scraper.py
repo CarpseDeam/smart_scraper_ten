@@ -79,31 +79,31 @@ class TenipoScraper:
             except OSError as e:
                 logging.error(f"Error cleaning up profile {self.profile_path}: {e}")
 
-    def _get_intercepted_xml(self, url_pattern: str, timeout: int = 15) -> str | None:
+    def _get_all_intercepted_xml_bodies(self, timeout: int = 10) -> List[str]:
+        """Gets the decoded bodies of ALL captured XML responses."""
         end_time = time.monotonic() + timeout
-        while time.monotonic() < end_time:
-            script = f"""
-                const url = Object.keys(window.interceptedResponses || {{}}).find(k => k.includes('{url_pattern}'));
-                if (url) {{
-                    const body = window.interceptedResponses[url];
-                    delete window.interceptedResponses[url];
-                    return body;
-                }}
-                return null;
-            """
-            try:
-                body = self.driver.execute_script(script)
-                if body:
-                    decoded_body = self.driver.execute_script("return janko(arguments[0]);", body)
-                    logging.info(f"INTERCEPT: Successfully retrieved and decoded data for '{url_pattern}'.")
-                    return decoded_body
-            except WebDriverException as e:
-                logging.warning(f"Could not execute script, browser may be navigating. Retrying... Error: {e}")
+        bodies = []
 
-            time.sleep(0.25)
+        # Give the page a few seconds to make all its calls
+        time.sleep(5)
 
-        logging.error(f"INTERCEPT TIMEOUT: Did not intercept a response for '{url_pattern}' after {timeout} seconds.")
-        return None
+        get_all_script = """
+            const responses = window.interceptedResponses || {};
+            const bodies = Object.values(responses);
+            window.interceptedResponses = {}; // Clear after reading
+            return bodies;
+        """
+        try:
+            raw_bodies = self.driver.execute_script(get_all_script)
+            for body in raw_bodies:
+                decoded_body = self.driver.execute_script("return janko(arguments[0]);", body)
+                if decoded_body:
+                    bodies.append(decoded_body)
+            logging.info(f"INTERCEPT: Successfully retrieved and decoded {len(bodies)} XML feeds.")
+            return bodies
+        except WebDriverException as e:
+            logging.error(f"Could not execute script to get all XML bodies. Error: {e}")
+            return []
 
     def _clear_captured_responses(self):
         if self.driver:
@@ -115,8 +115,8 @@ class TenipoScraper:
 
     def get_live_matches_summary(self) -> tuple[bool, List[Dict[str, Any]]]:
         """
-        Fetches the main summary feed, expecting a flat XML structure where each
-        <match> tag contains all necessary attributes, including 'tournament_name'.
+        Loads the livescore page, dynamically discovers ALL XML data feeds,
+        consolidates them, and parses them into a single list of matches.
         """
         if self.driver is None:
             return False, []
@@ -124,47 +124,42 @@ class TenipoScraper:
             self._clear_captured_responses()
             self.driver.get(str(self.settings.LIVESCORE_PAGE_URL))
 
-            decoded_xml_string = self._get_intercepted_xml("change2.xml", timeout=20)
-            if not decoded_xml_string:
-                logging.warning("Could not find change2.xml via interception. Returning failure status.")
-                return False, []
+            # --- Step 1: Discover and retrieve all available XML feeds ---
+            all_xml_bodies = self._get_all_intercepted_xml_bodies(timeout=15)
 
-            logging.info("--- RAW change2.xml CONTENT START ---")
-            logging.info(decoded_xml_string.strip())
-            logging.info("--- RAW change2.xml CONTENT END ---")
+            if not all_xml_bodies:
+                logging.warning("DISCOVERY: No XML data feeds were intercepted. The page might be empty or changed.")
+                return True, []
 
-            parser = ET.XMLParser(recover=True, encoding='utf-8')
-            root = ET.fromstring(decoded_xml_string.encode('utf-8'), parser=parser)
-            if root is None:
-                logging.warning("Parsed XML root is None. Returning failure status.")
-                return False, []
-
+            # --- Step 2: Consolidate all matches from all feeds ---
             all_parsed_matches = []
-            logging.info("--- Parsing Matches from Summary Feed ---")
-            for match_element in root.xpath('//match'):
-                match_data = self._xml_to_dict(match_element)
+            parser = ET.XMLParser(recover=True, encoding='utf-8')
 
-                # --- NEW DIAGNOSTIC LOGGING ---
-                p1 = match_data.get('player1', 'P1_Unknown')
-                p2 = match_data.get('player2', 'P2_Unknown')
-                tourn = match_data.get('tournament_name', 'Tourn_Unknown')
-                match_id = match_data.get('id', 'ID_Unknown')
-                logging.info(f"PARSED_MATCH: ID={match_id}, Players='{p1}' vs '{p2}', Tournament='{tourn}'")
-                # --- END NEW LOGGING ---
+            for i, xml_body in enumerate(all_xml_bodies):
+                root = ET.fromstring(xml_body.encode('utf-8'), parser=parser)
+                if root is None:
+                    continue
 
-                if 'tournament_name' in match_data:
-                    all_parsed_matches.append(match_data)
-                else:
-                    logging.warning(f"Match element found without a 'tournament_name' attribute. Skipping. Data: {match_data}")
-            logging.info("--- End of Match Parsing ---")
+                matches_in_feed = 0
+                for match_element in root.xpath('//match'):
+                    match_data = self._xml_to_dict(match_element)
+                    if 'id' in match_data and 'tournament_name' in match_data:
+                        all_parsed_matches.append(match_data)
+                        matches_in_feed += 1
+                logging.info(f"CONSOLIDATE: Parsed {matches_in_feed} matches from feed #{i + 1}.")
 
-            logging.info(f"Successfully parsed a total of {len(all_parsed_matches)} matches from the flat summary feed.")
+            # --- Step 3: Deduplicate and Finalize ---
+            # It's possible different feeds could contain the same match.
+            final_matches_map = {match['id']: match for match in all_parsed_matches}
+            final_match_list = list(final_matches_map.values())
 
-            if not all_parsed_matches:
-                logging.warning(
-                    "Scraper parsed 0 matches from summary. The feed might be momentarily empty.")
+            logging.info(
+                f"FINALIZED: A total of {len(final_match_list)} unique matches were parsed from all discovered feeds.")
 
-            return True, all_parsed_matches
+            if not final_match_list:
+                logging.warning("Scraper parsed 0 unique matches from all feeds. The site may be empty.")
+
+            return True, final_match_list
 
         except Exception as e:
             logging.error(f"Error in get_live_matches_summary: {e}", exc_info=True)
@@ -178,13 +173,14 @@ class TenipoScraper:
             self._clear_captured_responses()
             self.driver.get(match_page_url)
 
-            main_xml_str = self._get_intercepted_xml(f"match{match_id}.xml", timeout=10)
+            # We only need the one specific match xml here
+            main_xml_str = self._get_all_intercepted_xml_bodies(timeout=10)
             if not main_xml_str:
                 logging.error(f"Failed to get main match data for {match_id} via interception.")
                 return {}
 
             parser = ET.XMLParser(recover=True, encoding='utf-8')
-            main_root = ET.fromstring(main_xml_str.encode('utf-8'), parser=parser)
+            main_root = ET.fromstring(main_xml_str[0].encode('utf-8'), parser=parser)
             combined_data = {"match": self._xml_to_dict(main_root)}
 
             pbp_html_data = self._scrape_html_pbp()
