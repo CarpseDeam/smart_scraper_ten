@@ -29,69 +29,6 @@ def _to_int_score(value):
         return 0
 
 
-def _build_tournament_name(match_info: dict) -> str:
-    """
-    Intelligently constructs the full, human-readable tournament name
-    from the various parts available in the XML data.
-    """
-    category = _safe_get_from_dict(match_info, "category", "")
-    location = _safe_get_from_dict(match_info, "location", "")
-    main_name = _safe_get_from_dict(match_info, "name", "")
-    sub_name = _safe_get_from_dict(match_info, "tournament_name", "")
-
-    primary_name = f"{category} {location}".strip()
-    if not primary_name:
-        primary_name = main_name
-
-    secondary_name = main_name if main_name != primary_name else sub_name
-
-    if primary_name and secondary_name and secondary_name not in primary_name:
-        return f"{primary_name} ({secondary_name})"
-
-    return primary_name or "Unknown Tournament"
-
-
-def _parse_score_data(match_info: dict) -> Dict[str, Any]:
-    """
-    Parses the score from the match_info dictionary, prioritizing nested set
-    data but falling back to the flat structure for robustness.
-    """
-    score_data = {
-        "sets": [
-            {"p1": 0, "p2": 0}, {"p1": 0, "p2": 0}, {"p1": 0, "p2": 0},
-            {"p1": 0, "p2": 0}, {"p1": 0, "p2": 0},
-        ],
-        "currentGame": {"p1": _safe_get_from_dict(match_info, "game1"),
-                        "p2": _safe_get_from_dict(match_info, "game2")},
-        "status": "LIVE" if _safe_get_from_dict(match_info, "winner") == "0" else "COMPLETED"
-    }
-
-    # First, try to find a nested 'set' or 'sets' object, which is the likely correct structure.
-    sets_list = _safe_get_from_dict(match_info, 'set') or _safe_get_from_dict(match_info, 'sets')
-    if sets_list:
-        if isinstance(sets_list, dict):  # If only one set exists, it may not be a list
-            sets_list = [sets_list]
-
-        for i, set_info in enumerate(sets_list):
-            if i < 5 and isinstance(set_info, dict):
-                p1_score = _to_int_score(set_info.get('p1', set_info.get('score1')))
-                p2_score = _to_int_score(set_info.get('p2', set_info.get('score2')))
-                score_data["sets"][i] = {"p1": p1_score, "p2": p2_score}
-        return score_data
-
-    # Fallback to the old flat structure if the nested one is not found.
-    for i in range(1, 6):
-        p1_key = f"set{i}1"
-        p2_key = f"set{i}2"
-        if p1_key in match_info or p2_key in match_info:
-            score_data["sets"][i - 1] = {
-                "p1": _to_int_score(_safe_get_from_dict(match_info, p1_key)),
-                "p2": _to_int_score(_safe_get_from_dict(match_info, p2_key))
-            }
-
-    return score_data
-
-
 def _parse_point_by_point(pbp_html_data: list) -> list:
     """Parses the point-by-point data that was scraped from the page's HTML."""
     if not pbp_html_data:
@@ -176,7 +113,11 @@ def _parse_stats_string(stats_str: str) -> list:
     ]
 
 
-def transform_match_data_to_client_format(raw_data: dict, match_id: str) -> dict:
+def transform_match_data_to_client_format(raw_data: dict, match_id: str, tournament_name: str) -> dict:
+    """
+    Transforms the raw scraped data into the final format for the database and API.
+    It now accepts the correct tournament name directly and does not try to rebuild it.
+    """
     if "match" not in raw_data:
         logging.warning("transform_match_data called with invalid data format.")
         return {}
@@ -191,11 +132,27 @@ def transform_match_data_to_client_format(raw_data: dict, match_id: str) -> dict
 
     return {
         "match_url": f"https://tenipo.com/match/-/{match_id}",
-        "tournament": _build_tournament_name(match_info),
+        "tournament": tournament_name, # Use the correct name passed from the service
         "round": _parse_round_info(_safe_get_from_dict(match_info, "round", "")).get("round_name"),
         "timePolled": datetime.now(timezone.utc).isoformat(),
         "players": [p1_info, p2_info],
-        "score": _parse_score_data(match_info),
+        "score": {
+            "sets": [
+                {"p1": _to_int_score(_safe_get_from_dict(match_info, "set11")),
+                 "p2": _to_int_score(_safe_get_from_dict(match_info, "set12"))},
+                {"p1": _to_int_score(_safe_get_from_dict(match_info, "set21")),
+                 "p2": _to_int_score(_safe_get_from_dict(match_info, "set22"))},
+                {"p1": _to_int_score(_safe_get_from_dict(match_info, "set31")),
+                 "p2": _to_int_score(_safe_get_from_dict(match_info, "set32"))},
+                {"p1": _to_int_score(_safe_get_from_dict(match_info, "set41")),
+                 "p2": _to_int_score(_safe_get_from_dict(match_info, "set42"))},
+                {"p1": _to_int_score(_safe_get_from_dict(match_info, "set51")),
+                 "p2": _to_int_score(_safe_get_from_dict(match_info, "set52"))},
+            ],
+            "currentGame": {"p1": _safe_get_from_dict(match_info, "game1"),
+                            "p2": _safe_get_from_dict(match_info, "game2")},
+            "status": "LIVE" if _safe_get_from_dict(match_info, "winner") == "0" else "COMPLETED"
+        },
         "matchInfo": {
             "court": _safe_get_from_dict(match_info, "court_name"),
             "started": datetime.fromtimestamp(_to_int_score(_safe_get_from_dict(match_info, "starttime")),
