@@ -1,3 +1,4 @@
+# smart_scraper.py
 import logging
 import os
 import shutil
@@ -130,29 +131,36 @@ class TenipoScraper:
                 logging.warning("Parsed XML root is None. Returning failure status.")
                 return False, []
 
-            all_parsed_matches = []
-            current_tournament_name = "Unknown"
+            # --- Two-Pass Parsing Logic ---
+            tournaments_by_id = {}
+            all_match_elements = []
 
-            # This is the stateful loop that fixes the entire problem.
-            # It remembers the last tournament header it saw.
-            for element in root:
+            # Pass 1: Gather all tournaments and matches separately.
+            for element in root.xpath('//event | //match'):
                 if element.tag == 'event':
-                    # When we see a tournament header, we update our memory.
+                    event_id = element.get("id")
+                    if not event_id:
+                        continue
                     name_parts = [element.get("name", ""), element.get("tournament_name", ""),
                                   element.get("category", "")]
-                    current_tournament_name = " ".join(part for part in name_parts if part).strip()
-                    # An event can also contain matches as children. Handle this case too.
-                    matches_in_event = element.findall("./match")
-                    for match_element in matches_in_event:
-                        match_data = self._xml_to_dict(match_element)
-                        match_data['tournament_name'] = current_tournament_name
-                        all_parsed_matches.append(match_data)
+                    tournament_name = " ".join(part for part in name_parts if part).strip()
+                    if tournament_name:
+                        tournaments_by_id[event_id] = tournament_name
 
                 elif element.tag == 'match':
-                    # When we see a match, we assign it the tournament name we are remembering.
-                    match_data = self._xml_to_dict(element)
-                    match_data['tournament_name'] = current_tournament_name
-                    all_parsed_matches.append(match_data)
+                    all_match_elements.append(element)
+
+            # Pass 2: Assemble matches with their correct tournament names.
+            all_parsed_matches = []
+            for match_element in all_match_elements:
+                match_data = self._xml_to_dict(match_element)
+                event_id = match_data.get("event_id")
+
+                # Look up the tournament name from our map. Default to "Unknown" if not found.
+                tournament_name = tournaments_by_id.get(event_id, "Unknown")
+                match_data['tournament_name'] = tournament_name
+
+                all_parsed_matches.append(match_data)
 
             logging.info(f"Parsed a total of {len(all_parsed_matches)} matches from summary.")
 
