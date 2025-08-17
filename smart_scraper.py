@@ -113,6 +113,13 @@ class TenipoScraper:
             except WebDriverException as e:
                 logging.warning(f"Could not clear browser cache, browser may have been closed. Error: {e}")
 
+    def _get_tournament_name_from_element(self, element: ET.Element) -> str:
+        """Helper to consistently parse a tournament name from an <event> element."""
+        if element is None or element.tag != 'event':
+            return ""
+        name_parts = [element.get("name", ""), element.get("tournament_name", ""), element.get("category", "")]
+        return " ".join(part for part in name_parts if part).strip()
+
     def get_live_matches_summary(self) -> tuple[bool, List[Dict[str, Any]]]:
         if self.driver is None:
             return False, []
@@ -131,59 +138,45 @@ class TenipoScraper:
                 logging.warning("Parsed XML root is None. Returning failure status.")
                 return False, []
 
-            # --- Hybrid Parsing Logic ---
-            tournaments_by_id = {}
+            # --- Resilient "Detective" Parser ---
 
-            # Pass 1: Greedily build a map of every event_id to its name.
-            # This handles cases where matches appear before their event header.
-            for event_element in root.xpath('//event'):
-                event_id = event_element.get("id")
-                if not event_id:
-                    continue
-                name_parts = [event_element.get("name", ""), event_element.get("tournament_name", ""),
-                              event_element.get("category", "")]
-                tournament_name = " ".join(part for part in name_parts if part).strip()
-                if tournament_name:
-                    tournaments_by_id[event_id] = tournament_name
+            # 1. Build a map of all known tournament IDs first.
+            tournaments_by_id = {
+                event.get("id"): self._get_tournament_name_from_element(event)
+                for event in root.xpath('//event[@id]')
+                if self._get_tournament_name_from_element(event)
+            }
 
-            # Pass 2: Iterate through the tree, maintaining state but prioritizing the ID map.
             all_parsed_matches = []
-            current_tournament_name = "Unknown"  # For stateful fallback
+            # 2. Find every match element in the document, regardless of location.
+            for match_element in root.xpath('//match'):
+                match_data = self._xml_to_dict(match_element)
+                tournament_name = "Unknown"
 
-            for element in root:  # Iterate through top-level elements to preserve order
-                if element.tag == 'event':
-                    # Update state for any subsequent sibling matches
-                    name_parts = [element.get("name", ""), element.get("tournament_name", ""),
-                                  element.get("category", "")]
-                    # Only update if a valid name is found
-                    current_tournament_name = " ".join(
-                        part for part in name_parts if part).strip() or current_tournament_name
+                # Method A: Check if the direct parent is an event.
+                parent = match_element.getparent()
+                if parent is not None and parent.tag == 'event':
+                    tournament_name = self._get_tournament_name_from_element(parent)
 
-                    # Process matches that are CHILDREN of this event
-                    for match_element in element.xpath('./match'):
-                        match_data = self._xml_to_dict(match_element)
-                        # Here, we can be certain of the tournament name from the parent.
-                        match_data['tournament_name'] = current_tournament_name
-                        all_parsed_matches.append(match_data)
+                # Method B: If not, check if the match has a linkable event_id.
+                if tournament_name == "Unknown" and match_data.get("event_id") in tournaments_by_id:
+                    tournament_name = tournaments_by_id[match_data["event_id"]]
 
-                elif element.tag == 'match':
-                    # Process matches that are SIBLINGS of events
-                    match_data = self._xml_to_dict(element)
-                    event_id = match_data.get("event_id")
+                # Method C: If not, check the preceding sibling.
+                if tournament_name == "Unknown":
+                    prev_sibling = match_element.getprevious()
+                    if prev_sibling is not None and prev_sibling.tag == 'event':
+                        tournament_name = self._get_tournament_name_from_element(prev_sibling)
 
-                    # Priority 1: Try to find name from our pre-built map (most reliable)
-                    tournament_name_from_map = tournaments_by_id.get(event_id)
+                # Method D: As a final fallback, find the nearest preceding event in the whole document.
+                if tournament_name == "Unknown":
+                    # This XPath finds the very first <event> tag that appears before the current <match> tag.
+                    preceding_events = match_element.xpath('./preceding::event')
+                    if preceding_events:
+                        tournament_name = self._get_tournament_name_from_element(preceding_events[-1])
 
-                    if tournament_name_from_map:
-                        match_data['tournament_name'] = tournament_name_from_map
-                    else:
-                        # Priority 2: Fallback to the last seen tournament name (stateful)
-                        match_data['tournament_name'] = current_tournament_name
-                        if event_id:
-                            logging.warning(
-                                f"Match {match_data.get('id')} has event_id {event_id} but it was not found in the tournament map. Falling back to stateful name '{current_tournament_name}'.")
-
-                    all_parsed_matches.append(match_data)
+                match_data['tournament_name'] = tournament_name
+                all_parsed_matches.append(match_data)
 
             logging.info(f"Parsed a total of {len(all_parsed_matches)} matches from summary.")
 
