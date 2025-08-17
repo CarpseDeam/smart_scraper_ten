@@ -47,7 +47,8 @@ class ScrapingService:
             return
 
         self.mongo_manager = MongoManager(self.settings)
-        if self.mongo_manager.client:
+
+        if self.mongo_manager.client is not None:
             self.archiver = MongoArchiver(self.mongo_manager)
             telegram_notifier = TelegramNotifier(self.settings)
             self.stall_monitor = StallMonitor(notifier=telegram_notifier, settings=self.settings)
@@ -55,7 +56,6 @@ class ScrapingService:
             logging.info("ScrapingService started, polling task created.")
         else:
             logging.critical("ScrapingService did not start polling task due to MongoDB connection failure.")
-
 
     async def stop(self):
         """Gracefully stops all background tasks and closes resources."""
@@ -109,7 +109,10 @@ class ScrapingService:
             self.scraper_pool = None
 
     async def _process_single_match(self, match_id: str) -> tuple[str, dict | None]:
-        """Checks out a scraper from the pool, processes one match, and returns it."""
+        """
+        Checks out a scraper, fetches and transforms data for one match, and
+        conditionally saves it to the database if it's an ITF match.
+        """
         loop = asyncio.get_event_loop()
         worker = None
         try:
@@ -121,9 +124,20 @@ class ScrapingService:
                 return match_id, None
 
             formatted_data = transform_match_data_to_client_format(raw_data, match_id)
-            if self.mongo_manager and self.mongo_manager.client:
-                await loop.run_in_executor(None, lambda: self.mongo_manager.save_match_data(match_id, formatted_data))
-            return match_id, formatted_data
+
+            # --- THE CORRECT FILTER ---
+            # Only save the match to the database if the final, mapped tournament name is ITF.
+            # This is the robust way to ensure we capture all and only ITF matches.
+            tournament_name = formatted_data.get("tournament", "")
+            if "ITF" in tournament_name and "ATP" not in tournament_name:
+                if self.mongo_manager and self.mongo_manager.client:
+                    await loop.run_in_executor(None,
+                                               lambda: self.mongo_manager.save_match_data(match_id, formatted_data))
+                return match_id, formatted_data  # Return data so it can be cached
+            else:
+                logging.info(f"MATCH_TASK({match_id}): Skipping non-ITF match with tournament '{tournament_name}'.")
+                return match_id, None  # Return None so it's excluded from the cache
+
         except Exception as e:
             logging.error(f"MATCH_TASK({match_id}): Unhandled exception during processing: {e}", exc_info=True)
             return match_id, None
@@ -147,38 +161,31 @@ class ScrapingService:
                                                                                   self.main_scraper.get_live_matches_summary)
 
                 if summary_success:
-                    itf_matches_summary = [
-                        m for m in all_matches_summary
-                        if m and "ITF" in m.get("tournament_name", "") and "ATP" not in m.get("tournament_name", "")
-                    ]
-                    logging.info(f"Found {len(itf_matches_summary)} live ITF matches in feed.")
-                    live_match_ids = [m['id'] for m in itf_matches_summary if m and 'id' in m]
+                    logging.info(f"Found {len(all_matches_summary)} total matches in feed. Fetching details for all...")
+                    live_match_ids = [m['id'] for m in all_matches_summary if m and 'id' in m]
 
                     if self.scraper_pool is None and live_match_ids:
                         await self._initialize_worker_pool()
 
-                    if itf_matches_summary and self.scraper_pool:
-                        tasks = [self._process_single_match(match['id']) for match in itf_matches_summary]
+                    if all_matches_summary and self.scraper_pool:
+                        tasks = [self._process_single_match(match['id']) for match in all_matches_summary]
                         logging.info(f"Processing {len(tasks)} matches and updating database...")
                         await asyncio.gather(*tasks)
                 else:
                     logging.warning(
                         "Main scraper failed to get a valid summary. Skipping scrape phase for this cycle.")
 
-                # --- STABLE CACHE LOGIC ---
-                # After every cycle (even a failed scrape), rebuild the cache from the database,
-                # which is our stable source of truth. This stops the "blinking" cache.
                 if self.mongo_manager:
                     active_matches_from_db = await loop.run_in_executor(None, self.mongo_manager.get_all_active_matches)
                     new_cache_data = {match['_id']: match for match in active_matches_from_db}
                     self.live_data_cache["data"] = new_cache_data
                     self.live_data_cache["last_updated"] = datetime.now(timezone.utc)
-                    logging.info(f"BACKGROUND_POLL: Cache rebuilt from DB with {len(new_cache_data)} active matches.")
+                    logging.info(
+                        f"BACKGROUND_POLL: Cache rebuilt from DB with {len(new_cache_data)} active ITF matches.")
 
                     if self.stall_monitor:
                         await self.stall_monitor.check_and_update_all(new_cache_data)
 
-                # After every successful cycle, run the archiver to clean up completed matches.
                 if self.archiver:
                     logging.info("BACKGROUND_POLL: Running archiver to clean up completed matches from DB...")
                     await loop.run_in_executor(None, self.archiver.archive_completed_matches)
