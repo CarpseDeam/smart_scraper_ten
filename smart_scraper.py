@@ -113,14 +113,11 @@ class TenipoScraper:
             except WebDriverException as e:
                 logging.warning(f"Could not clear browser cache, browser may have been closed. Error: {e}")
 
-    def _get_tournament_name_from_element(self, element: ET.Element) -> str:
-        """Helper to consistently parse a tournament name from an <event> element."""
-        if element is None or element.tag != 'event':
-            return ""
-        name_parts = [element.get("name", ""), element.get("tournament_name", ""), element.get("category", "")]
-        return " ".join(part for part in name_parts if part).strip()
-
     def get_live_matches_summary(self) -> tuple[bool, List[Dict[str, Any]]]:
+        """
+        Fetches the main summary feed, expecting a flat XML structure where each
+        <match> tag contains all necessary attributes, including 'tournament_name'.
+        """
         if self.driver is None:
             return False, []
         try:
@@ -144,52 +141,28 @@ class TenipoScraper:
                 logging.warning("Parsed XML root is None. Returning failure status.")
                 return False, []
 
-            # --- Resilient "Detective" Parser ---
-
-            # 1. Build a map of all known tournament IDs first.
-            tournaments_by_id = {
-                event.get("id"): self._get_tournament_name_from_element(event)
-                for event in root.xpath('//event[@id]')
-                if self._get_tournament_name_from_element(event)
-            }
-
+            # --- Definitive Flat XML Parser ---
+            # This parser correctly handles the observed flat XML structure where each
+            # <match> element is self-contained and includes a 'tournament_name' attribute.
             all_parsed_matches = []
-            # 2. Find every match element in the document, regardless of location.
             for match_element in root.xpath('//match'):
+                # The existing _xml_to_dict helper correctly converts all element attributes to a dictionary.
                 match_data = self._xml_to_dict(match_element)
-                tournament_name = "Unknown"
 
-                # Method A: Check if the direct parent is an event.
-                parent = match_element.getparent()
-                if parent is not None and parent.tag == 'event':
-                    tournament_name = self._get_tournament_name_from_element(parent)
+                # The summary feed provides the best tournament name, so we ensure it's passed along.
+                # The key from the XML is 'tournament_name', which we will use directly.
+                if 'tournament_name' in match_data:
+                    all_parsed_matches.append(match_data)
+                else:
+                    logging.warning(f"Match element found without a 'tournament_name' attribute. Skipping. Data: {match_data}")
 
-                # Method B: If not, check if the match has a linkable event_id.
-                if tournament_name == "Unknown" and match_data.get("event_id") in tournaments_by_id:
-                    tournament_name = tournaments_by_id[match_data["event_id"]]
 
-                # Method C: If not, check the preceding sibling.
-                if tournament_name == "Unknown":
-                    prev_sibling = match_element.getprevious()
-                    if prev_sibling is not None and prev_sibling.tag == 'event':
-                        tournament_name = self._get_tournament_name_from_element(prev_sibling)
+            logging.info(f"Correctly parsed a total of {len(all_parsed_matches)} matches from the flat summary feed.")
 
-                # Method D: As a final fallback, find the nearest preceding event in the whole document.
-                if tournament_name == "Unknown":
-                    # This XPath finds the very first <event> tag that appears before the current <match> tag.
-                    preceding_events = match_element.xpath('./preceding::event')
-                    if preceding_events:
-                        tournament_name = self._get_tournament_name_from_element(preceding_events[-1])
-
-                match_data['tournament_name'] = tournament_name
-                all_parsed_matches.append(match_data)
-
-            logging.info(f"Parsed a total of {len(all_parsed_matches)} matches from summary.")
-
+            # It's okay if the feed is empty, that's not a failure.
             if not all_parsed_matches:
                 logging.warning(
-                    "SANITY CHECK FAILED: Scraper parsed 0 matches from summary. Forcing a failure status to protect DB.")
-                return False, []
+                    "Scraper parsed 0 matches from summary. The feed might be momentarily empty.")
 
             return True, all_parsed_matches
 

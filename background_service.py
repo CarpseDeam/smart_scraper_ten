@@ -114,39 +114,36 @@ class ScrapingService:
         Processes a single match using a worker, passing the correct tournament name
         from the summary feed to the data mapper.
         """
+        # --- Pre-filter based on tournament name BEFORE wasting resources on scraping details ---
+        # This is a simple, effective way to only process matches we care about.
+        if "itf" not in tournament_name.lower():
+            logging.info(
+                f"MATCH_TASK({match_id}): Pre-filtered out. Tournament '{tournament_name}' is not an ITF event.")
+            return match_id, None
+
         loop = asyncio.get_event_loop()
         worker = None
         try:
             worker = await self.scraper_pool.get()
-            logging.info(f"MATCH_TASK({match_id}): Worker acquired. Processing for tournament '{tournament_name}'...")
+            logging.info(f"MATCH_TASK({match_id}): Worker acquired. Processing ITF match from tournament '{tournament_name}'...")
             raw_data = await loop.run_in_executor(None, lambda: worker.fetch_match_data(match_id))
 
             if not raw_data:
-                logging.warning(f"MATCH_TASK({match_id}): Scraper returned no raw data. Aborting processing for this match.")
+                logging.warning(f"MATCH_TASK({match_id}): Scraper returned no raw data. Aborting.")
                 return match_id, None
 
             # Pass the correct tournament name from the summary feed to the mapper.
-            # This prevents it from being overwritten by less complete data from the match-specific XML.
             formatted_data = transform_match_data_to_client_format(raw_data, match_id, tournament_name)
 
             if not formatted_data:
-                logging.warning(f"MATCH_TASK({match_id}): Data mapper returned an empty dictionary. Aborting processing for this match.")
+                logging.warning(f"MATCH_TASK({match_id}): Data mapper returned an empty dictionary. Aborting.")
                 return match_id, None
 
-            # Final, case-insensitive check to ensure we only save ITF matches
-            tournament_title = formatted_data.get("tournament", "")
-            is_itf_match = "itf" in tournament_title.lower()
-            is_not_atp_match = "atp" not in tournament_title.lower()
-
-            if is_itf_match and is_not_atp_match:
-                if self.mongo_manager and self.mongo_manager.client:
-                    await loop.run_in_executor(None,
-                                               lambda: self.mongo_manager.save_match_data(match_id, formatted_data))
-                return match_id, formatted_data
-            else:
-                logging.info(
-                    f"MATCH_TASK({match_id}): Match skipped by filter. Tournament: '{tournament_title}'. [is_itf={is_itf_match}, is_not_atp={is_not_atp_match}]")
-                return match_id, None
+            # With the pre-filter, we know this is an ITF match, so we can save it directly.
+            if self.mongo_manager and self.mongo_manager.client:
+                await loop.run_in_executor(None,
+                                           lambda: self.mongo_manager.save_match_data(match_id, formatted_data))
+            return match_id, formatted_data
 
         except Exception as e:
             logging.error(f"MATCH_TASK({match_id}): Unhandled exception during processing: {e}", exc_info=True)
@@ -178,8 +175,7 @@ class ScrapingService:
                         await self._initialize_worker_pool()
 
                     if all_matches_summary and self.scraper_pool:
-                        # Create tasks for ALL matches found in the summary. The filtering happens
-                        # inside the worker after we have the most complete data.
+                        # Create tasks for all matches found. The filtering now happens inside the worker.
                         tasks = [self._process_single_match(match['id'], match['tournament_name']) for match in
                                  all_matches_summary if match and 'id' in match and 'tournament_name' in match]
                         logging.info(f"Processing {len(tasks)} matches and updating database...")
