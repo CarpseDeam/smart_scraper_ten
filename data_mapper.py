@@ -1,3 +1,4 @@
+# data_mapper.py
 import logging
 import re
 from datetime import datetime, timezone
@@ -130,9 +131,15 @@ def transform_match_data_to_client_format(raw_data: dict, match_id: str, tournam
     p2_info = _parse_player_info(_safe_get_from_dict(match_info, "player2", ""),
                                  _safe_get_from_dict(match_info, "country2", ""))
 
+    # --- ROBUST STATUS DETERMINATION ---
+    # A match is only COMPLETED if the 'winner' field exists and is not '0'.
+    # Otherwise, it is considered LIVE. This prevents premature archiving.
+    winner_status = _safe_get_from_dict(match_info, "winner")
+    status = "COMPLETED" if winner_status and winner_status != "0" else "LIVE"
+
     return {
         "match_url": f"https://tenipo.com/match/-/{match_id}",
-        "tournament": tournament_name, # Use the correct name passed from the service
+        "tournament": tournament_name,  # Use the correct name passed from the service
         "round": _parse_round_info(_safe_get_from_dict(match_info, "round", "")).get("round_name"),
         "timePolled": datetime.now(timezone.utc).isoformat(),
         "players": [p1_info, p2_info],
@@ -151,7 +158,7 @@ def transform_match_data_to_client_format(raw_data: dict, match_id: str, tournam
             ],
             "currentGame": {"p1": _safe_get_from_dict(match_info, "game1"),
                             "p2": _safe_get_from_dict(match_info, "game2")},
-            "status": "LIVE" if _safe_get_from_dict(match_info, "winner") == "0" else "COMPLETED"
+            "status": status
         },
         "matchInfo": {
             "court": _safe_get_from_dict(match_info, "court_name"),
