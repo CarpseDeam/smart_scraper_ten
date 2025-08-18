@@ -118,7 +118,7 @@ class ScrapingService:
         tournament_name = summary_data.get('tournament_name', '')
 
         if "itf" not in tournament_name.lower():
-            logging.info(
+            logging.debug(
                 f"MATCH_TASK({match_id}): Pre-filtered out. Tournament '{tournament_name}' is not an ITF event.")
             return match_id, None
 
@@ -175,12 +175,10 @@ class ScrapingService:
                         tasks = []
                         live_ids_from_feed = {match['id'] for match in all_matches_summary}
 
-                        # --- 1. Create tasks for all currently live matches ---
                         live_tasks = [self._process_single_match(match) for match in all_matches_summary if
                                       match and 'id' in match]
                         tasks.extend(live_tasks)
 
-                        # --- 2. Orphan Cleanup: Find matches in DB that are NOT in the live feed ---
                         active_matches_from_db = await loop.run_in_executor(None,
                                                                             self.mongo_manager.get_all_active_matches)
                         ids_in_db = {match['_id'] for match in active_matches_from_db}
@@ -189,9 +187,25 @@ class ScrapingService:
                         if orphaned_ids:
                             logging.info(
                                 f"CLEANUP: Found {len(orphaned_ids)} orphaned matches to check for completion.")
-                            # The summary data is now stale, but we can use the data from our own DB as a base
                             orphan_docs = [match for match in active_matches_from_db if match['_id'] in orphaned_ids]
-                            cleanup_tasks = [self._process_single_match(doc) for doc in orphan_docs]
+
+                            normalized_orphans = []
+                            for doc in orphan_docs:
+                                try:
+                                    normalized_doc = {
+                                        'id': doc.get('_id'),
+                                        'tournament_name': doc.get('tournament', 'ITF Orphan'),
+                                        'player1': doc.get('players', [{}])[0].get('name', ''),
+                                        'player2': doc.get('players', [{}, {}])[1].get('name', ''),
+                                        'country1': doc.get('players', [{}])[0].get('country', ''),
+                                        'country2': doc.get('players', [{}, {}])[1].get('country', ''),
+                                        'h2h': doc.get('h2h', '')
+                                    }
+                                    normalized_orphans.append(normalized_doc)
+                                except (IndexError, KeyError) as e:
+                                    logging.error(f"Failed to normalize orphan doc with id {doc.get('_id')}: {e}")
+
+                            cleanup_tasks = [self._process_single_match(orphan) for orphan in normalized_orphans]
                             tasks.extend(cleanup_tasks)
 
                         if tasks:
@@ -203,7 +217,6 @@ class ScrapingService:
                     logging.warning(
                         "Main scraper failed to get a valid summary. Skipping scrape phase for this cycle.")
 
-                # Rebuild cache after all updates are done
                 final_active_matches = await loop.run_in_executor(None, self.mongo_manager.get_all_active_matches)
                 new_cache_data = {match['_id']: match for match in final_active_matches}
                 self.live_data_cache["data"] = new_cache_data
