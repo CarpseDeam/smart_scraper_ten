@@ -109,13 +109,14 @@ class ScrapingService:
             self.all_workers = []
             self.scraper_pool = None
 
-    async def _process_single_match(self, match_id: str, tournament_name: str) -> tuple[str, dict | None]:
+    async def _process_single_match(self, summary_data: dict) -> tuple[str, dict | None]:
         """
-        Processes a single match using a worker, passing the correct tournament name
-        from the summary feed to the data mapper.
+        Processes a single match using a worker, passing both the summary data and
+        detailed scraped data to the mapper for a complete picture.
         """
-        # --- Pre-filter based on tournament name BEFORE wasting resources on scraping details ---
-        # This is a simple, effective way to only process matches we care about.
+        match_id = summary_data.get('id')
+        tournament_name = summary_data.get('tournament_name', '')
+
         if "itf" not in tournament_name.lower():
             logging.info(
                 f"MATCH_TASK({match_id}): Pre-filtered out. Tournament '{tournament_name}' is not an ITF event.")
@@ -125,21 +126,20 @@ class ScrapingService:
         worker = None
         try:
             worker = await self.scraper_pool.get()
-            logging.info(f"MATCH_TASK({match_id}): Worker acquired. Processing ITF match from tournament '{tournament_name}'...")
+            logging.info(
+                f"MATCH_TASK({match_id}): Worker acquired. Processing ITF match from tournament '{tournament_name}'...")
             raw_data = await loop.run_in_executor(None, lambda: worker.fetch_match_data(match_id))
 
             if not raw_data:
                 logging.warning(f"MATCH_TASK({match_id}): Scraper returned no raw data. Aborting.")
                 return match_id, None
 
-            # Pass the correct tournament name from the summary feed to the mapper.
-            formatted_data = transform_match_data_to_client_format(raw_data, match_id, tournament_name)
+            formatted_data = transform_match_data_to_client_format(raw_data, summary_data)
 
             if not formatted_data:
                 logging.warning(f"MATCH_TASK({match_id}): Data mapper returned an empty dictionary. Aborting.")
                 return match_id, None
 
-            # With the pre-filter, we know this is an ITF match, so we can save it directly.
             if self.mongo_manager and self.mongo_manager.client:
                 await loop.run_in_executor(None,
                                            lambda: self.mongo_manager.save_match_data(match_id, formatted_data))
@@ -168,32 +168,51 @@ class ScrapingService:
                                                                                   self.main_scraper.get_live_matches_summary)
 
                 if summary_success:
-                    logging.info(
-                        f"Found {len(all_matches_summary)} total matches in feed. Processing all for details...")
-
                     if self.scraper_pool is None and all_matches_summary:
                         await self._initialize_worker_pool()
 
-                    if all_matches_summary and self.scraper_pool:
-                        # Create tasks for all matches found. The filtering now happens inside the worker.
-                        tasks = [self._process_single_match(match['id'], match['tournament_name']) for match in
-                                 all_matches_summary if match and 'id' in match and 'tournament_name' in match]
-                        logging.info(f"Processing {len(tasks)} matches and updating database...")
-                        await asyncio.gather(*tasks)
+                    if self.scraper_pool:
+                        tasks = []
+                        live_ids_from_feed = {match['id'] for match in all_matches_summary}
+
+                        # --- 1. Create tasks for all currently live matches ---
+                        live_tasks = [self._process_single_match(match) for match in all_matches_summary if
+                                      match and 'id' in match]
+                        tasks.extend(live_tasks)
+
+                        # --- 2. Orphan Cleanup: Find matches in DB that are NOT in the live feed ---
+                        active_matches_from_db = await loop.run_in_executor(None,
+                                                                            self.mongo_manager.get_all_active_matches)
+                        ids_in_db = {match['_id'] for match in active_matches_from_db}
+                        orphaned_ids = ids_in_db - live_ids_from_feed
+
+                        if orphaned_ids:
+                            logging.info(
+                                f"CLEANUP: Found {len(orphaned_ids)} orphaned matches to check for completion.")
+                            # The summary data is now stale, but we can use the data from our own DB as a base
+                            orphan_docs = [match for match in active_matches_from_db if match['_id'] in orphaned_ids]
+                            cleanup_tasks = [self._process_single_match(doc) for doc in orphan_docs]
+                            tasks.extend(cleanup_tasks)
+
+                        if tasks:
+                            logging.info(
+                                f"Processing {len(tasks)} total tasks ({len(live_tasks)} live, {len(orphaned_ids)} cleanup).")
+                            await asyncio.gather(*tasks)
+
                 else:
                     logging.warning(
                         "Main scraper failed to get a valid summary. Skipping scrape phase for this cycle.")
 
-                if self.mongo_manager:
-                    active_matches_from_db = await loop.run_in_executor(None, self.mongo_manager.get_all_active_matches)
-                    new_cache_data = {match['_id']: match for match in active_matches_from_db}
-                    self.live_data_cache["data"] = new_cache_data
-                    self.live_data_cache["last_updated"] = datetime.now(timezone.utc)
-                    logging.info(
-                        f"BACKGROUND_POLL: Cache rebuilt from DB with {len(new_cache_data)} active ITF matches.")
+                # Rebuild cache after all updates are done
+                final_active_matches = await loop.run_in_executor(None, self.mongo_manager.get_all_active_matches)
+                new_cache_data = {match['_id']: match for match in final_active_matches}
+                self.live_data_cache["data"] = new_cache_data
+                self.live_data_cache["last_updated"] = datetime.now(timezone.utc)
+                logging.info(
+                    f"BACKGROUND_POLL: Cache rebuilt from DB with {len(new_cache_data)} active ITF matches.")
 
-                    if self.stall_monitor:
-                        await self.stall_monitor.check_and_update_all(new_cache_data)
+                if self.stall_monitor:
+                    await self.stall_monitor.check_and_update_all(new_cache_data)
 
                 if self.archiver:
                     logging.info("BACKGROUND_POLL: Running archiver to clean up completed matches from DB...")

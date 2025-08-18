@@ -114,32 +114,30 @@ def _parse_stats_string(stats_str: str) -> list:
     ]
 
 
-def transform_match_data_to_client_format(raw_data: dict, match_id: str, tournament_name: str) -> dict:
+def transform_match_data_to_client_format(raw_data: dict, summary_data: dict) -> dict:
     """
-    Transforms the raw scraped data into the final format for the database and API.
-    It now accepts the correct tournament name directly and does not try to rebuild it.
+    Transforms the raw scraped data into the final format for the database and API,
+    prioritizing the reliable data from the initial summary feed.
     """
     if "match" not in raw_data:
-        logging.warning("transform_match_data called with invalid data format.")
+        logging.warning("transform_match_data called with invalid raw_data format.")
         return {}
 
+    match_id = summary_data.get('id')
     match_info = raw_data["match"]
     pbp_info = raw_data.get("point_by_point_html", [])
 
-    p1_info = _parse_player_info(_safe_get_from_dict(match_info, "player1", ""),
-                                 _safe_get_from_dict(match_info, "country1", ""))
-    p2_info = _parse_player_info(_safe_get_from_dict(match_info, "player2", ""),
-                                 _safe_get_from_dict(match_info, "country2", ""))
+    p1_info = _parse_player_info(_safe_get_from_dict(summary_data, "player1", ""),
+                                 _safe_get_from_dict(summary_data, "country1", ""))
+    p2_info = _parse_player_info(_safe_get_from_dict(summary_data, "player2", ""),
+                                 _safe_get_from_dict(summary_data, "country2", ""))
 
-    # --- ROBUST STATUS DETERMINATION ---
-    # A match is only COMPLETED if the 'winner' field exists and is not '0'.
-    # Otherwise, it is considered LIVE. This prevents premature archiving.
     winner_status = _safe_get_from_dict(match_info, "winner")
     status = "COMPLETED" if winner_status and winner_status != "0" else "LIVE"
 
     return {
         "match_url": f"https://tenipo.com/match/-/{match_id}",
-        "tournament": tournament_name,  # Use the correct name passed from the service
+        "tournament": _safe_get_from_dict(summary_data, "tournament_name", "N/A"),
         "round": _parse_round_info(_safe_get_from_dict(match_info, "round", "")).get("round_name"),
         "timePolled": datetime.now(timezone.utc).isoformat(),
         "players": [p1_info, p2_info],
@@ -168,5 +166,5 @@ def transform_match_data_to_client_format(raw_data: dict, match_id: str, tournam
         },
         "statistics": _parse_stats_string(_safe_get_from_dict(match_info, "stats", "")),
         "pointByPoint": _parse_point_by_point(pbp_info),
-        "h2h": _parse_h2h_string(_safe_get_from_dict(match_info, "h2h", "")),
+        "h2h": _parse_h2h_string(_safe_get_from_dict(summary_data, "h2h", "")),
     }
