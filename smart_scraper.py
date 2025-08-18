@@ -142,11 +142,24 @@ class TenipoScraper:
             return False, []
         try:
             self.driver.get(str(self.settings.LIVESCORE_PAGE_URL))
-            time.sleep(3)
 
-            self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-            logging.info("Scrolled to bottom of page to trigger lazy-loaded data.")
-            time.sleep(3)
+            # --- START: NEW ROBUST SCROLLING LOGIC ---
+            logging.info("Starting robust scroll to discover all lazy-loaded content...")
+            last_height = self.driver.execute_script("return document.body.scrollHeight")
+            scroll_attempts = 0
+            # Safety break (10 attempts) to prevent potential infinite loops on weird pages
+            while scroll_attempts < 10:
+                self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+                # Wait for new content to potentially load after scrolling
+                time.sleep(2)
+                new_height = self.driver.execute_script("return document.body.scrollHeight")
+                if new_height == last_height:
+                    logging.info("Page height has not changed, assuming all content is loaded.")
+                    break
+                last_height = new_height
+                scroll_attempts += 1
+                logging.info(f"Page height increased after scroll. Continuing... (Attempt {scroll_attempts})")
+            # --- END: NEW ROBUST SCROLLING LOGIC ---
 
             all_xml_bodies = self._get_all_intercepted_xml_bodies()
 
