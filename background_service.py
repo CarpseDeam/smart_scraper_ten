@@ -125,6 +125,10 @@ class ScrapingService:
         loop = asyncio.get_event_loop()
         worker = None
         try:
+            if not self.scraper_pool:
+                logging.error(f"MATCH_TASK({match_id}): Cannot process, scraper pool is not initialized.")
+                return match_id, None
+
             worker = await self.scraper_pool.get()
             logging.info(
                 f"MATCH_TASK({match_id}): Worker acquired. Processing ITF match from tournament '{tournament_name}'...")
@@ -149,7 +153,7 @@ class ScrapingService:
             logging.error(f"MATCH_TASK({match_id}): Unhandled exception during processing: {e}", exc_info=True)
             return match_id, None
         finally:
-            if worker:
+            if worker and self.scraper_pool:
                 self.scraper_pool.put_nowait(worker)
                 logging.info(f"MATCH_TASK({match_id}): Worker released back to pool.")
 
@@ -171,7 +175,7 @@ class ScrapingService:
                     if self.scraper_pool is None and all_matches_summary:
                         await self._initialize_worker_pool()
 
-                    if self.scraper_pool:
+                    if self.scraper_pool and self.mongo_manager:
                         tasks = []
                         live_ids_from_feed = {match['id'] for match in all_matches_summary}
 
@@ -189,6 +193,7 @@ class ScrapingService:
                                 f"CLEANUP: Found {len(orphaned_ids)} orphaned matches to check for completion.")
                             orphan_docs = [match for match in active_matches_from_db if match['_id'] in orphaned_ids]
 
+                            # **THE FIX IS HERE**: Normalizing the DB doc to look like a summary doc
                             normalized_orphans = []
                             for doc in orphan_docs:
                                 try:
@@ -210,26 +215,28 @@ class ScrapingService:
 
                         if tasks:
                             logging.info(
-                                f"Processing {len(tasks)} total tasks ({len(live_tasks)} live, {len(orphaned_ids)} cleanup).")
-                            await asyncio.gather(*tasks)
+                                f"Processing {len(tasks)} total tasks ({len(live_tasks)} live, {len(cleanup_tasks)} cleanup).")
+                            results = await asyncio.gather(*tasks)
+                            # You can optionally inspect 'results' here for debugging
 
                 else:
                     logging.warning(
                         "Main scraper failed to get a valid summary. Skipping scrape phase for this cycle.")
 
-                final_active_matches = await loop.run_in_executor(None, self.mongo_manager.get_all_active_matches)
-                new_cache_data = {match['_id']: match for match in final_active_matches}
-                self.live_data_cache["data"] = new_cache_data
-                self.live_data_cache["last_updated"] = datetime.now(timezone.utc)
-                logging.info(
-                    f"BACKGROUND_POLL: Cache rebuilt from DB with {len(new_cache_data)} active ITF matches.")
+                if self.mongo_manager:
+                    final_active_matches = await loop.run_in_executor(None, self.mongo_manager.get_all_active_matches)
+                    new_cache_data = {match['_id']: match for match in final_active_matches}
+                    self.live_data_cache["data"] = new_cache_data
+                    self.live_data_cache["last_updated"] = datetime.now(timezone.utc)
+                    logging.info(
+                        f"BACKGROUND_POLL: Cache rebuilt from DB with {len(new_cache_data)} active ITF matches.")
 
-                if self.stall_monitor:
-                    await self.stall_monitor.check_and_update_all(new_cache_data)
+                    if self.stall_monitor:
+                        await self.stall_monitor.check_and_update_all(new_cache_data)
 
-                if self.archiver:
-                    logging.info("BACKGROUND_POLL: Running archiver to clean up completed matches from DB...")
-                    await loop.run_in_executor(None, self.archiver.archive_completed_matches)
+                    if self.archiver:
+                        logging.info("BACKGROUND_POLL: Running archiver to clean up completed matches from DB...")
+                        await loop.run_in_executor(None, self.archiver.archive_completed_matches)
 
             except Exception as e:
                 logging.error(f"BACKGROUND_POLL: Unhandled error during polling cycle: {e}", exc_info=True)
