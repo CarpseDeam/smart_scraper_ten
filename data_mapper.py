@@ -2,7 +2,7 @@
 import logging
 import re
 from datetime import datetime, timezone
-from typing import Dict, Any
+from typing import Dict, Any, Tuple
 
 
 # --- Helper Functions ---
@@ -28,6 +28,44 @@ def _to_int_score(value):
         return int(float(value))
     except (ValueError, TypeError):
         return 0
+
+
+def _determine_status(match_info: Dict[str, Any]) -> str:
+    """
+    Determines the match status using a robust, multi-layered check.
+    This is the core fix to reliably detect completed matches.
+    """
+    # 1. Check for the explicit winner tag from the API.
+    winner_status = _safe_get_from_dict(match_info, "winner")
+    if winner_status and winner_status in ["1", "2"]:
+        logging.debug(f"Status determined by 'winner' tag: {winner_status}")
+        return "COMPLETED"
+
+    # 2. Check for explicit text-based statuses.
+    status_text = _safe_get_from_dict(match_info, "status", "").lower()
+    completed_keywords = ["finished", "retired", "walkover", "awarded", "cancelled"]
+    if any(keyword in status_text for keyword in completed_keywords):
+        logging.debug(f"Status determined by status text: '{status_text}'")
+        return "COMPLETED"
+
+    # 3. Calculate the winner from the set scores as a fallback.
+    p1_sets_won = 0
+    p2_sets_won = 0
+    for i in range(1, 6):  # Check up to 5 sets
+        p1_score = _to_int_score(_safe_get_from_dict(match_info, f"set{i}1"))
+        p2_score = _to_int_score(_safe_get_from_dict(match_info, f"set{i}2"))
+
+        if p1_score > p2_score:
+            p1_sets_won += 1
+        elif p2_score > p1_score:
+            p2_sets_won += 1
+
+    # Standard ITF matches are best-of-3 sets. A player needs 2 sets to win.
+    if p1_sets_won >= 2 or p2_sets_won >= 2:
+        logging.debug(f"Status determined by calculating set scores: P1 Sets={p1_sets_won}, P2 Sets={p2_sets_won}")
+        return "COMPLETED"
+
+    return "LIVE"
 
 
 def _parse_point_by_point(pbp_html_data: list) -> list:
@@ -132,8 +170,7 @@ def transform_match_data_to_client_format(raw_data: dict, summary_data: dict) ->
     p2_info = _parse_player_info(_safe_get_from_dict(summary_data, "player2", ""),
                                  _safe_get_from_dict(summary_data, "country2", ""))
 
-    winner_status = _safe_get_from_dict(match_info, "winner")
-    status = "COMPLETED" if winner_status and winner_status != "0" else "LIVE"
+    status = _determine_status(match_info)
 
     return {
         "match_url": f"https://tenipo.com/match/-/{match_id}",
