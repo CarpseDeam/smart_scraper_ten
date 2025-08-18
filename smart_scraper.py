@@ -80,27 +80,21 @@ class TenipoScraper:
                 logging.error(f"Error cleaning up profile {self.profile_path}: {e}")
 
     def _get_intercepted_xml_body(self, url_pattern: str, timeout: int = 15) -> str | None:
-        """
-        Gets a SINGLE decoded/plain XML body matching a URL pattern.
-        This is used for fetching specific match files.
-        """
         get_single_script = f"""
             const url = Object.keys(window.interceptedResponses || {{}}).find(k => k.includes('{url_pattern}'));
             if (!url) return null;
 
             const body = window.interceptedResponses[url];
-            delete window.interceptedResponses[url]; // Consume it
+            delete window.interceptedResponses[url];
 
             try {{
-                // Attempt to decode using the site's function
                 return janko(body);
             }} catch (e) {{
-                // If it fails, it might be plain XML. Check if it looks valid.
                 if (typeof body === 'string' && body.trim().startsWith('<')) {{
                     return body;
                 }}
             }}
-            return null; // Return null if it's not decodable and not plain XML
+            return null;
         """
         end_time = time.monotonic() + timeout
         while time.monotonic() < end_time:
@@ -116,26 +110,18 @@ class TenipoScraper:
         logging.error(f"INTERCEPT TIMEOUT: Did not intercept a response for '{url_pattern}' after {timeout} seconds.")
         return None
 
-    def _get_all_intercepted_xml_bodies(self, wait_time: int = 5) -> List[str]:
-        """
-        Gets the decoded/plain bodies of ALL captured XML responses.
-        This is used for the main summary feed.
-        """
-        time.sleep(wait_time)  # Allow time for all asynchronous feeds to load
-
+    def _get_all_intercepted_xml_bodies(self) -> List[str]:
         get_all_script = """
             const responses = window.interceptedResponses || {};
             const bodies = Object.values(responses);
             const processedBodies = [];
-            window.interceptedResponses = {}; // Clear after reading
+            window.interceptedResponses = {};
 
             for (const body of bodies) {
                 try {
-                    // Attempt to decode using the site's function
                     const decoded = janko(body);
                     processedBodies.push(decoded);
                 } catch (e) {
-                    // If decoding fails, it might be plain XML. Check if it looks valid.
                     if (typeof body === 'string' && body.trim().startsWith('<')) {
                         processedBodies.push(body);
                     }
@@ -151,23 +137,16 @@ class TenipoScraper:
             logging.error(f"Could not execute script to get all XML bodies. Error: {e}")
             return []
 
-    def _clear_captured_responses(self):
-        if self.driver:
-            try:
-                self.driver.execute_script("window.interceptedResponses = {};")
-                logging.debug("Cleared in-browser interception cache.")
-            except WebDriverException as e:
-                logging.warning(f"Could not clear browser cache, browser may have been closed. Error: {e}")
-
     def get_live_matches_summary(self) -> tuple[bool, List[Dict[str, Any]]]:
-        """
-        Loads the livescore page, dynamically discovers ALL XML data feeds,
-        consolidates them, and parses them into a single list of matches.
-        """
         if self.driver is None:
             return False, []
         try:
             self.driver.get(str(self.settings.LIVESCORE_PAGE_URL))
+            time.sleep(3)
+
+            self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            logging.info("Scrolled to bottom of page to trigger lazy-loaded data.")
+            time.sleep(3)
 
             all_xml_bodies = self._get_all_intercepted_xml_bodies()
 
@@ -207,7 +186,6 @@ class TenipoScraper:
             return False, []
 
     def fetch_match_data(self, match_id: str) -> Dict[str, Any]:
-        """Fetches and processes data for a single, specific match."""
         if self.driver is None: return {}
         match_page_url = f"https://tenipo.com/match/-/{match_id}"
         logging.info(f"FETCHING data for match ID: {match_id}")
@@ -293,18 +271,14 @@ class TenipoScraper:
         return []
 
     def investigate_data_sources(self, match_id: str):
-        """
-        A debugging method to find new data sources for a given match.
-        """
         if not self.driver:
             logging.error("Cannot investigate, driver not started.")
             return []
 
-        # Navigate to the page
         match_page_url = f"https://tenipo.com/match/-/{match_id}"
         self.driver.get(match_page_url)
 
-        time.sleep(10)  # Wait for requests to be made
+        time.sleep(10)
 
         script = "return Object.keys(window.interceptedResponses || {});"
         urls = self.driver.execute_script(script)
