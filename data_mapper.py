@@ -113,9 +113,10 @@ def _parse_round_info(round_str):
     }
 
 
-def _parse_h2h_string(h2h_str: str) -> list:
+def _parse_h2h_string(h2h_str: Any) -> list:
     """Parses the dense H2H string into a list of previous meetings."""
-    if not h2h_str: return []
+    if not isinstance(h2h_str, str) or not h2h_str:
+        return []
     meetings = []
     for part in h2h_str.split('#'):
         fields = part.split('/')
@@ -129,9 +130,10 @@ def _parse_h2h_string(h2h_str: str) -> list:
     return meetings
 
 
-def _parse_stats_string(stats_str: str) -> list:
+def _parse_stats_string(stats_str: Any) -> list:
     """Parses the dense stats string into the client's detailed format."""
-    if not stats_str or '/' not in stats_str: return []
+    if not isinstance(stats_str, str) or '/' not in stats_str:
+        return []
     STAT_MAP = {
         1: "Aces", 2: "Double Faults", 3: "1st Serve", 4: "1st Serve Points Won",
         5: "2nd Serve Points Won", 6: "Break Points Saved", 7: "Service Games Played",
@@ -220,5 +222,5 @@ def transform_match_data_to_client_format(raw_data: dict, summary_data: dict) ->
         },
         "statistics": _parse_stats_string(_get_value_with_fallbacks(consolidated_data, ["stats", "statistics"], "")),
         "pointByPoint": _parse_point_by_point(pbp_info),
-        "h2h": _parse_h2h_string(_safe_get_from_dict(summary_data, "h2h", "")),
+        "h2h": _parse_h2h_string(_get_value_with_fallbacks(consolidated_data, ["h2h"], "")),
     }
