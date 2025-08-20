@@ -193,13 +193,22 @@ def transform_match_data_to_client_format(raw_data: dict, summary_data: dict) ->
 
     status = _determine_status(consolidated_data)
 
-    # Build the sets list using the robust getter to handle different key names
+    # Build the sets list, now including tie-break scores
     sets_list = []
     for i in range(1, 6):
-        sets_list.append({
-            "p1": _to_int_score(_get_value_with_fallbacks(consolidated_data, [f"s{i}1", f"set{i}1"])),
-            "p2": _to_int_score(_get_value_with_fallbacks(consolidated_data, [f"s{i}2", f"set{i}2"]))
-        })
+        p1_score = _to_int_score(_get_value_with_fallbacks(consolidated_data, [f"s{i}1", f"set{i}1"]))
+        p2_score = _to_int_score(_get_value_with_fallbacks(consolidated_data, [f"s{i}2", f"set{i}2"]))
+
+        set_data = {"p1": p1_score, "p2": p2_score}
+
+        # If it was a tie-break set, find the tie-break scores
+        if p1_score + p2_score == 13:
+            p1_tb = _get_value_with_fallbacks(consolidated_data, [f"s{i}tb1", f"set{i}tb1"])
+            p2_tb = _get_value_with_fallbacks(consolidated_data, [f"s{i}tb2", f"set{i}tb2"])
+            set_data["p1_tiebreak"] = _to_int_score(p1_tb) if p1_tb else None
+            set_data["p2_tiebreak"] = _to_int_score(p2_tb) if p2_tb else None
+
+        sets_list.append(set_data)
 
     # Determine the definitive source for statistics
     stats_from_xml = _parse_stats_string(_get_value_with_fallbacks(consolidated_data, ["stats", "statistics"], ""))
