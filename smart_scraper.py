@@ -287,34 +287,46 @@ class TenipoScraper:
         if self.driver is None:
             return []
         try:
-            # Use a robust XPath selector to find the button by its text content.
-            stats_button_xpath = "//*[normalize-space()='Stats']"
+            # Step 1: Find the button using its correct ID and click it.
             stats_button = WebDriverWait(self.driver, 10).until(
-                EC.element_to_be_clickable((By.XPATH, stats_button_xpath))
+                EC.element_to_be_clickable((By.ID, "buttonstatsall"))
             )
             self.driver.execute_script("arguments[0].click();", stats_button)
 
-            # Use a more general wait to find any statistics row.
+            # Step 2: Wait for the main statistics container to appear.
             WebDriverWait(self.driver, 10).until(
-                EC.presence_of_element_located((By.CLASS_NAME, "statistika"))
+                EC.presence_of_element_located((By.ID, "stats"))
             )
 
-            service_keywords = ["Aces", "Double Faults", "1st Serve", "1st Serve Points Won", "2nd Serve Points Won",
-                                "Break Points Saved", "Service Games Played"]
+            service_keywords = ["Aces", "Serve", "Faults", "Break Points"]
             service_stats, return_stats = [], []
 
-            # Retry loop to handle dynamic content loading
+            # Step 3: Scrape the data using the correct class names.
+            # Retry loop to handle any dynamic content loading issues.
             for attempt in range(3):
                 try:
-                    stat_rows = self.driver.find_elements(By.CLASS_NAME, "statistika")
+                    stat_rows = self.driver.find_elements(By.CLASS_NAME, "stat")
                     if not stat_rows:
                         time.sleep(0.5)
                         continue
 
+                    # Clear lists to avoid duplicates on retry
+                    service_stats, return_stats = [], []
+
                     for row in stat_rows:
-                        stat_name = row.find_element(By.CLASS_NAME, "nazev").text.strip()
-                        p1_val = row.find_element(By.CLASS_NAME, "hodnota1").text.strip()
-                        p2_val = row.find_element(By.CLASS_NAME, "hodnota2").text.strip()
+                        # Skip rows that are placeholders (e.g., Winners, Errors)
+                        if "opacity: 0.5" in row.get_attribute("style"):
+                            continue
+
+                        stat_name = row.find_element(By.CLASS_NAME, "stat_name").text.strip()
+                        value_elements = row.find_elements(By.CLASS_NAME, "stat_col")
+
+                        # Ensure we have at least two value columns before proceeding
+                        if len(value_elements) < 2:
+                            continue
+
+                        p1_val = value_elements[0].text.strip().replace("\n", " ")
+                        p2_val = value_elements[1].text.strip().replace("\n", " ")
 
                         stat_item = {"name": stat_name, "home": p1_val, "away": p2_val}
 
@@ -324,6 +336,7 @@ class TenipoScraper:
                             return_stats.append(stat_item)
 
                     if service_stats or return_stats:
+                        logging.info(f"Successfully scraped {len(service_stats) + len(return_stats)} statistics rows.")
                         return [
                             {"groupName": "Service", "statisticsItems": service_stats},
                             {"groupName": "Return", "statisticsItems": return_stats}
@@ -336,7 +349,7 @@ class TenipoScraper:
                     time.sleep(0.5)
 
         except TimeoutException:
-            logging.info("Could not find a clickable 'Stats' tab or statistics content did not load in time.")
+            logging.info("Statistics tab/content not found for this match.")
         except Exception as e:
             logging.error(f"An unexpected error occurred during statistics scraping: {e}", exc_info=True)
 
