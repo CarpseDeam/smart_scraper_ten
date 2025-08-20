@@ -64,8 +64,8 @@ def _determine_status(match_info: Dict[str, Any]) -> str:
     p1_sets_won = 0
     p2_sets_won = 0
     for i in range(1, 6):  # Check up to 5 sets
-        p1_score = _to_int_score(_get_value_with_fallbacks(match_info, [f"set{i}1", f"s{i}1"]))
-        p2_score = _to_int_score(_get_value_with_fallbacks(match_info, [f"set{i}2", f"s{i}2"]))
+        p1_score = _to_int_score(_get_value_with_fallbacks(match_info, [f"s{i}1", f"set{i}1"]))
+        p2_score = _to_int_score(_get_value_with_fallbacks(match_info, [f"s{i}2", f"set{i}2"]))
 
         if p1_score > p2_score:
             p1_sets_won += 1
@@ -197,8 +197,8 @@ def transform_match_data_to_client_format(raw_data: dict, summary_data: dict) ->
     sets_list = []
     for i in range(1, 6):
         sets_list.append({
-            "p1": _to_int_score(_get_value_with_fallbacks(consolidated_data, [f"set{i}1", f"s{i}1"])),
-            "p2": _to_int_score(_get_value_with_fallbacks(consolidated_data, [f"set{i}2", f"s{i}2"]))
+            "p1": _to_int_score(_get_value_with_fallbacks(consolidated_data, [f"s{i}1", f"set{i}1"])),
+            "p2": _to_int_score(_get_value_with_fallbacks(consolidated_data, [f"s{i}2", f"set{i}2"]))
         })
 
     # Determine the definitive source for statistics
