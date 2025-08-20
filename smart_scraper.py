@@ -214,8 +214,8 @@ class TenipoScraper:
             main_root = ET.fromstring(main_xml_str.encode('utf-8'), parser=parser)
             combined_data = {"match": self._xml_to_dict(main_root)}
 
-            pbp_html_data = self._scrape_html_pbp()
-            combined_data['point_by_point_html'] = pbp_html_data
+            combined_data['point_by_point_html'] = self._scrape_html_pbp()
+            combined_data['statistics_html'] = self._scrape_html_statistics()
             return combined_data
         except Exception as e:
             logging.error(f"FATAL error in fetch_match_data for ID {match_id}: {e}", exc_info=True)
@@ -280,6 +280,62 @@ class TenipoScraper:
         except Exception as e:
             logging.error(f"An unexpected error occurred during PBP scraping: {e}", exc_info=True)
             return []
+
+        return []
+
+    def _scrape_html_statistics(self) -> List[Dict[str, Any]]:
+        if self.driver is None:
+            return []
+        try:
+            stats_button = WebDriverWait(self.driver, 10).until(
+                EC.element_to_be_clickable((By.ID, "buttonstats"))
+            )
+            self.driver.execute_script("arguments[0].click();", stats_button)
+
+            # Wait for the stats container to be present.
+            WebDriverWait(self.driver, 10).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, ".statistics-all .statistika"))
+            )
+
+            service_keywords = ["Aces", "Double Faults", "1st Serve", "1st Serve Points Won", "2nd Serve Points Won",
+                                "Break Points Saved", "Service Games Played"]
+            service_stats, return_stats = [], []
+
+            # Retry loop to handle dynamic content loading
+            for attempt in range(3):
+                try:
+                    stat_rows = self.driver.find_elements(By.CLASS_NAME, "statistika")
+                    if not stat_rows:
+                        time.sleep(0.5)
+                        continue
+
+                    for row in stat_rows:
+                        stat_name = row.find_element(By.CLASS_NAME, "nazev").text.strip()
+                        p1_val = row.find_element(By.CLASS_NAME, "hodnota1").text.strip()
+                        p2_val = row.find_element(By.CLASS_NAME, "hodnota2").text.strip()
+
+                        stat_item = {"name": stat_name, "home": p1_val, "away": p2_val}
+
+                        if any(keyword in stat_name for keyword in service_keywords):
+                            service_stats.append(stat_item)
+                        else:
+                            return_stats.append(stat_item)
+
+                    if service_stats or return_stats:
+                        return [
+                            {"groupName": "Service", "statisticsItems": service_stats},
+                            {"groupName": "Return", "statisticsItems": return_stats}
+                        ]
+                except StaleElementReferenceException:
+                    logging.warning(f"Stats scrape attempt {attempt + 1}/3 failed due to StaleElementReference. Retrying...")
+                    if attempt == 2:
+                        raise
+                    time.sleep(0.5)
+
+        except TimeoutException:
+            logging.info("No statistics data available or button not found for this match.")
+        except Exception as e:
+            logging.error(f"An unexpected error occurred during statistics scraping: {e}", exc_info=True)
 
         return []
 

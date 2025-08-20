@@ -178,6 +178,7 @@ def transform_match_data_to_client_format(raw_data: dict, summary_data: dict) ->
     match_id = summary_data.get('id')
     match_details = raw_data.get("match", {})
     pbp_info = raw_data.get("point_by_point_html", [])
+    stats_from_html = raw_data.get("statistics_html", [])
 
     # Consolidate both data sources. Start with the summary and let the more specific
     # match details overwrite it. The robust getter functions will find the correct
@@ -200,6 +201,10 @@ def transform_match_data_to_client_format(raw_data: dict, summary_data: dict) ->
             "p2": _to_int_score(_get_value_with_fallbacks(consolidated_data, [f"set{i}2", f"s{i}2"]))
         })
 
+    # Determine the definitive source for statistics
+    stats_from_xml = _parse_stats_string(_get_value_with_fallbacks(consolidated_data, ["stats", "statistics"], ""))
+    final_statistics = stats_from_html if stats_from_html else stats_from_xml
+
     return {
         "match_url": f"https://tenipo.com/match/-/{match_id}",
         "tournament": _safe_get_from_dict(summary_data, "tournament_name", "N/A"),
@@ -220,7 +225,7 @@ def transform_match_data_to_client_format(raw_data: dict, summary_data: dict) ->
                                               tz=timezone.utc).isoformat() if _safe_get_from_dict(consolidated_data,
                                                                                                   "starttime") else None,
         },
-        "statistics": _parse_stats_string(_get_value_with_fallbacks(consolidated_data, ["stats", "statistics"], "")),
+        "statistics": final_statistics,
         "pointByPoint": _parse_point_by_point(pbp_info),
         "h2h": _parse_h2h_string(_get_value_with_fallbacks(consolidated_data, ["h2h"], "")),
     }
