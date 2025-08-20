@@ -287,14 +287,16 @@ class TenipoScraper:
         if self.driver is None:
             return []
         try:
+            # Use a robust XPath selector to find the button by its text content.
+            stats_button_xpath = "//*[normalize-space()='Stats']"
             stats_button = WebDriverWait(self.driver, 10).until(
-                EC.element_to_be_clickable((By.ID, "buttonstats"))
+                EC.element_to_be_clickable((By.XPATH, stats_button_xpath))
             )
             self.driver.execute_script("arguments[0].click();", stats_button)
 
-            # Wait for the stats container to be present.
+            # Use a more general wait to find any statistics row.
             WebDriverWait(self.driver, 10).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, ".statistics-all .statistika"))
+                EC.presence_of_element_located((By.CLASS_NAME, "statistika"))
             )
 
             service_keywords = ["Aces", "Double Faults", "1st Serve", "1st Serve Points Won", "2nd Serve Points Won",
@@ -327,13 +329,14 @@ class TenipoScraper:
                             {"groupName": "Return", "statisticsItems": return_stats}
                         ]
                 except StaleElementReferenceException:
-                    logging.warning(f"Stats scrape attempt {attempt + 1}/3 failed due to StaleElementReference. Retrying...")
+                    logging.warning(
+                        f"Stats scrape attempt {attempt + 1}/3 failed due to StaleElementReference. Retrying...")
                     if attempt == 2:
                         raise
                     time.sleep(0.5)
 
         except TimeoutException:
-            logging.info("No statistics data available or button not found for this match.")
+            logging.info("Could not find a clickable 'Stats' tab or statistics content did not load in time.")
         except Exception as e:
             logging.error(f"An unexpected error occurred during statistics scraping: {e}", exc_info=True)
 
