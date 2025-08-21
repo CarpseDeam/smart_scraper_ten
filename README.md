@@ -25,7 +25,7 @@ The system includes built-in monitoring to detect stalled matches and a sophisti
 
 ## Architecture Diagram
 
-```mermaid
+```
 graph TD
     subgraph "Web Server (e.g., Gunicorn)"
         W1[Worker 1 - LEADER]
