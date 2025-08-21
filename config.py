@@ -1,3 +1,4 @@
+# config.py
 from pydantic import HttpUrl, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -18,11 +19,11 @@ class Settings(BaseSettings):
 
     # --- Polling Settings ---
     CACHE_REFRESH_INTERVAL_SECONDS: int = Field(
-        default=15,
+        default=8,
         description="The interval in seconds between each poll for live match data."
     )
     CONCURRENT_SCRAPER_LIMIT: int = Field(
-        default=3,
+        default=5,
         description="The maximum number of scrapers to run at the same time. Tuned for the lighter selenium engine."
     )
 
@@ -41,7 +42,7 @@ class Settings(BaseSettings):
         description="The secret token for the Telegram bot. MUST be set as an environment variable."
     )
     TELEGRAM_CHAT_ID: str = Field(
-        description="The chat ID for Telegram alerts. MUST be set as an environment variable."
+        description="The chat ID for the Telegram bot. MUST be set as an environment variable."
     )
     STALL_MONITOR_SECONDS: int = Field(
         default=300,

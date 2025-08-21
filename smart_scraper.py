@@ -54,10 +54,16 @@ class TenipoScraper:
         self.profile_path = os.path.join("/tmp", f"selenium-profile-{uuid.uuid4()}")
         chrome_options.add_argument(f"--user-data-dir={self.profile_path}")
 
+        # --- Performance Optimizations ---
+        chrome_options.add_experimental_option(
+            "prefs", {"profile.managed_default_content_settings.images": 2}
+        )
         chrome_options.add_argument("--headless=new")
         chrome_options.add_argument("--no-sandbox")
         chrome_options.add_argument("--disable-dev-shm-usage")
         chrome_options.add_argument("--disable-gpu")
+        chrome_options.add_argument("--disable-extensions")
+        chrome_options.add_argument("--mute-audio")
         chrome_options.add_argument("--remote-debugging-port=0")
         chrome_options.add_argument(f"user-agent={self.settings.USER_AGENT}")
 
@@ -151,7 +157,7 @@ class TenipoScraper:
             while scroll_attempts < 10:
                 self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
                 # Wait for new content to potentially load after scrolling
-                time.sleep(2)
+                time.sleep(1)
                 new_height = self.driver.execute_script("return document.body.scrollHeight")
                 if new_height == last_height:
                     logging.info("Page height has not changed, assuming all content is loaded.")
