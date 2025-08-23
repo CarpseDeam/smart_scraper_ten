@@ -22,6 +22,11 @@ def _get_value_with_fallbacks(data: Dict, keys: List[str], default=None):
         val = data.get(key)
         if val is not None and val != "":
             return val
+    # If keys exist but are empty strings, we might need to return that for 0-0 scores.
+    # Check if any key exists at all.
+    for key in keys:
+        if key in data:
+            return data.get(key) # Return the empty string or None
     return default
 
 
@@ -169,47 +174,77 @@ def _parse_stats_string(stats_str: Any) -> list:
 def transform_match_data_to_client_format(raw_data: dict, summary_data: dict) -> dict:
     """
     Transforms the raw scraped data into the final format for the database and API,
-    enforcing a strict separation of data sources to prevent mixing.
+    enforcing a strict separation of data sources and handling live tiebreaks.
     """
     if "match" not in raw_data:
         logging.warning("transform_match_data called with invalid raw_data format.")
         return {}
 
-    # --- SOURCE OF TRUTH ENFORCEMENT ---
-    # `summary_data` is ONLY for stable, high-level info (ID, tournament, players).
-    # `match_details` (from raw_data) is the SINGLE SOURCE OF TRUTH for all dynamic data (scores, stats, etc.).
     match_id = summary_data.get('id')
     match_details = raw_data.get("match", {})
     pbp_info = raw_data.get("point_by_point_html", [])
     stats_from_html = raw_data.get("statistics_html", [])
 
-    # Use `summary_data` for player info as it's often more complete.
     p1_info = _parse_player_info(_safe_get_from_dict(summary_data, "player1", ""),
                                  _safe_get_from_dict(summary_data, "country1", ""))
     p2_info = _parse_player_info(_safe_get_from_dict(summary_data, "player2", ""),
                                  _safe_get_from_dict(summary_data, "country2", ""))
 
-    # --- ALL DYNAMIC DATA IS NOW PULLED EXCLUSIVELY FROM `match_details` ---
     status = _determine_status(match_details)
 
-    # Build the sets list from the reliable detailed source
+    # --- START: Corrected Score Parsing Logic ---
     sets_list = []
     for i in range(1, 6):
-        p1_score = _to_int_score(_get_value_with_fallbacks(match_details, [f"s{i}1", f"set{i}1"]))
-        p2_score = _to_int_score(_get_value_with_fallbacks(match_details, [f"s{i}2", f"set{i}2"]))
+        p1_score_raw = _get_value_with_fallbacks(match_details, [f"s{i}1", f"set{i}1"])
+        p2_score_raw = _get_value_with_fallbacks(match_details, [f"s{i}2", f"set{i}2"])
 
-        set_data = {"p1": p1_score, "p2": p2_score}
+        if p1_score_raw is None and p2_score_raw is None:
+            break
 
-        # If it was a tie-break set, find the tie-break scores
-        if p1_score + p2_score == 13:
-            p1_tb = _get_value_with_fallbacks(match_details, [f"s{i}tb1", f"set{i}tb1"])
-            p2_tb = _get_value_with_fallbacks(match_details, [f"s{i}tb2", f"set{i}tb2"])
-            set_data["p1_tiebreak"] = _to_int_score(p1_tb) if p1_tb else None
-            set_data["p2_tiebreak"] = _to_int_score(p2_tb) if p2_tb else None
+        p1_score_int = _to_int_score(p1_score_raw)
+        p2_score_int = _to_int_score(p2_score_raw)
+        set_data = {"p1": p1_score_int, "p2": p2_score_int}
+
+        p1_tb_raw = _get_value_with_fallbacks(match_details, [f"s{i}tb1", f"set{i}tb1"])
+        p2_tb_raw = _get_value_with_fallbacks(match_details, [f"s{i}tb2", f"set{i}tb2"])
+
+        if p1_tb_raw is not None or p2_tb_raw is not None:
+            set_data["p1_tiebreak"] = _to_int_score(p1_tb_raw)
+            set_data["p2_tiebreak"] = _to_int_score(p2_tb_raw)
+        else:
+            set_data["p1_tiebreak"] = None
+            set_data["p2_tiebreak"] = None
 
         sets_list.append(set_data)
 
-    # Determine the definitive source for statistics, prioritizing the detailed source
+    if status == "LIVE" and not sets_list:
+        logging.info(f"Match {match_id} is LIVE with no set data; initializing first set as 0-0.")
+        sets_list.append({"p1": 0, "p2": 0, "p1_tiebreak": None, "p2_tiebreak": None})
+
+    last_active_set = sets_list[-1] if sets_list else {}
+    current_game_score = None
+    current_tiebreak_score = None
+
+    is_in_live_tiebreak = (
+            status == "LIVE"
+            and last_active_set.get("p1") == 6
+            and last_active_set.get("p2") == 6
+            and last_active_set.get("p1_tiebreak") is None
+            and last_active_set.get("p2_tiebreak") is None
+    )
+
+    if is_in_live_tiebreak:
+        current_tiebreak_score = {
+            "p1": _get_value_with_fallbacks(match_details, ["tb1", "tiebreak1"]),
+            "p2": _get_value_with_fallbacks(match_details, ["tb2", "tiebreak2"])
+        }
+    elif status == "LIVE":
+        current_game_score = {
+            "p1": _get_value_with_fallbacks(match_details, ["game1", "point1"]),
+            "p2": _get_value_with_fallbacks(match_details, ["game2", "point2"])
+        }
+    # --- END: Corrected Score Parsing Logic ---
+
     stats_from_xml = _parse_stats_string(_get_value_with_fallbacks(match_details, ["stats", "statistics"], ""))
     final_statistics = stats_from_html if stats_from_html else stats_from_xml
 
@@ -221,10 +256,8 @@ def transform_match_data_to_client_format(raw_data: dict, summary_data: dict) ->
         "players": [p1_info, p2_info],
         "score": {
             "sets": sets_list,
-            "currentGame": {
-                "p1": _get_value_with_fallbacks(match_details, ["game1", "point1"]),
-                "p2": _get_value_with_fallbacks(match_details, ["game2", "point2"])
-            },
+            "currentGame": current_game_score,
+            "currentTiebreak": current_tiebreak_score,
             "status": status
         },
         "matchInfo": {

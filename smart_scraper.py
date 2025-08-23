@@ -24,7 +24,6 @@ class TenipoScraper:
     def __init__(self, settings: config.Settings):
         self.settings = settings
         self.driver: webdriver.Chrome | None = None
-        self.profile_path: str | None = None
 
     def start_driver(self):
         if self.driver is None:
@@ -51,21 +50,22 @@ class TenipoScraper:
 
     def _setup_driver(self) -> webdriver.Chrome:
         chrome_options = Options()
-        self.profile_path = os.path.join("/tmp", f"selenium-profile-{uuid.uuid4()}")
-        chrome_options.add_argument(f"--user-data-dir={self.profile_path}")
 
-        # --- Performance Optimizations ---
-        chrome_options.add_experimental_option(
-            "prefs", {"profile.managed_default_content_settings.images": 2}
-        )
-        chrome_options.add_argument("--headless=new")
+        # --- DEFINITIVE STABILITY FIXES FOR CONTAINERIZED ENVIRONMENTS ---
+        chrome_options.add_argument("--incognito")
         chrome_options.add_argument("--no-sandbox")
-        chrome_options.add_argument("--disable-dev-shm-usage")
+        chrome_options.add_argument("--disable-dev-shm-usage") # CRITICAL for Docker/Railway
+        chrome_options.add_argument("--headless=new")
         chrome_options.add_argument("--disable-gpu")
         chrome_options.add_argument("--disable-extensions")
         chrome_options.add_argument("--mute-audio")
         chrome_options.add_argument("--remote-debugging-port=0")
         chrome_options.add_argument(f"user-agent={self.settings.USER_AGENT}")
+
+        # Performance tweak
+        chrome_options.add_experimental_option(
+            "prefs", {"profile.managed_default_content_settings.images": 2}
+        )
 
         try:
             driver = webdriver.Chrome(options=chrome_options)
@@ -79,11 +79,6 @@ class TenipoScraper:
         if self.driver:
             self.driver.quit()
             self.driver = None
-        if self.profile_path and os.path.exists(self.profile_path):
-            try:
-                shutil.rmtree(self.profile_path)
-            except OSError as e:
-                logging.error(f"Error cleaning up profile {self.profile_path}: {e}")
 
     def _get_intercepted_xml_body(self, url_pattern: str, timeout: int = 15) -> str | None:
         get_single_script = f"""

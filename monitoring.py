@@ -1,4 +1,3 @@
-# monitoring.py
 import logging
 import asyncio
 from datetime import datetime, timezone, timedelta
@@ -60,10 +59,14 @@ class StallMonitor:
         try:
             score = match_data.get("score", {})
             sets = score.get("sets", [])
-            current_game = score.get("currentGame", {})
+            current_game = score.get("currentGame")  # Can be None
+            current_tiebreak = score.get("currentTiebreak")  # Can be None
+
             sets_str = "".join([f"{s.get('p1', '0')}{s.get('p2', '0')}" for s in sets])
-            game_str = f"{current_game.get('p1', '-')}{current_game.get('p2', '-')}"
-            return f"{sets_str}_{game_str}"
+            game_str = f"G{current_game.get('p1', '-')}{current_game.get('p2', '-')}" if current_game else ""
+            tb_str = f"T{current_tiebreak.get('p1', '-')}{current_tiebreak.get('p2', '-')}" if current_tiebreak else ""
+
+            return f"{sets_str}_{game_str}{tb_str}"
         except Exception:
             # If data structure is unexpected, return a unique hash to force an update
             return str(datetime.now(timezone.utc).timestamp())
@@ -76,10 +79,15 @@ class StallMonitor:
 
             score_parts = []
             for s in match_data['score']['sets']:
-                if s['p1'] > 0 or s['p2'] > 0:
-                    score_parts.append(f"{s['p1']}-{s['p2']}")
-            game = match_data['score']['currentGame']
-            game_score = f"({game.get('p1', '0')}-{game.get('p2', '0')})"
+                score_parts.append(f"{s.get('p1', 0)}-{s.get('p2', 0)}")
+
+            game_score = ""
+            if match_data['score'].get('currentGame'):
+                game = match_data['score']['currentGame']
+                game_score = f"({game.get('p1', '0')}-{game.get('p2', '0')})"
+            elif match_data['score'].get('currentTiebreak'):
+                tb = match_data['score']['currentTiebreak']
+                game_score = f"Tiebreak: ({tb.get('p1', '0')}-{tb.get('p2', '0')})"
 
             return (
                 f"🚨 **Match Stall Alert** 🚨\n\n"
