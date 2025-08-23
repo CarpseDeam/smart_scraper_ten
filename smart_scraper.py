@@ -98,32 +98,23 @@ class TenipoScraper:
             html_tree = html.fromstring(page_source)
 
             itf_matches = []
-            itf_header_rows = html_tree.xpath(
-                "//tr[.//div[contains(@class, 'tournament_logo') and contains(@style, 'itf.png')]]")
 
-            if not itf_header_rows:
-                logging.info(
-                    f"Discovered {len(final_matches_map)} total matches, but found 0 ITF tournament headers on the page.")
-                return True, []
+            # Find all top-level tournament containers that are explicitly ITF.
+            itf_tournament_blocks = html_tree.xpath(
+                "//div[contains(@class, 'table_round')][.//div[contains(@class, 'tournament_logo') and contains(@style, 'itf.png')]]")
 
-            for header_row in itf_header_rows:
-                # --- START: ROBUST NAME EXTRACTION ---
-                # Use `contains` for the style to avoid issues with extra whitespace or other style attributes.
-                name_element = header_row.xpath(".//span[contains(@style, 'font-weight:bold')]")
-                tournament_name = name_element[0].text_content().strip() if name_element else "ITF Tournament"
-                # --- END: ROBUST NAME EXTRACTION ---
+            for block in itf_tournament_blocks:
+                # Extract the tournament name from within this block.
+                name_element = block.find(".//span[contains(@style, 'font-weight:bold')]")
+                tournament_name = name_element.text_content().strip() if name_element is not None else "ITF Tournament"
 
-                # Process all sibling rows until we hit the next tournament header
-                for match_row in header_row.xpath("./following-sibling::tr"):
-                    # If this row is another header, we've finished this tournament block
-                    if match_row.find(".//div[contains(@class, 'hlavicka_turnaja')]") is not None:
-                        break
-
-                    id_element = match_row.find(".//*[@id]")
-                    if id_element is None: continue
-
-                    match_id_search = re.search(r'\[(\d+)\]', id_element.get('id', ''))
-                    if not match_id_search: continue
+                # Find all match tables within this same ITF block.
+                match_tables = block.findall(".//table[contains(@id, 'table')]")
+                for match_table in match_tables:
+                    table_id = match_table.get('id', '')
+                    match_id_search = re.search(r'\[(\d+)\]', table_id)
+                    if not match_id_search:
+                        continue
 
                     match_id = match_id_search.group(1)
 
@@ -134,9 +125,12 @@ class TenipoScraper:
                     match_summary['tournament_name'] = tournament_name
 
                     sets = []
+                    # Assuming the tab index is always 0 for the main livescore page
+                    tab_index = 0
                     for i in range(1, 6):
-                        p1_el = match_row.find(f".//td[@id='set1{i}1[{match_id}]']")
-                        p2_el = match_row.find(f".//td[@id='set2{i}1[{match_id}]']")
+                        p1_el = match_table.find(f".//td[@id='set1{i}{tab_index}[{match_id}]']")
+                        p2_el = match_table.find(f".//td[@id='set2{i}{tab_index}[{match_id}]']")
+
                         if p1_el is not None and p2_el is not None:
                             p1_text = p1_el.text_content().strip()
                             p2_text = p2_el.text_content().strip()
@@ -147,8 +141,8 @@ class TenipoScraper:
                         else:
                             break
 
-                    p1_game_el = match_row.find(f".//td[@id='game11[{match_id}]']")
-                    p2_game_el = match_row.find(f".//td[@id='game21[{match_id}]']")
+                    p1_game_el = match_table.find(f".//td[@id='game1{tab_index}[{match_id}]']")
+                    p2_game_el = match_table.find(f".//td[@id='game2{tab_index}[{match_id}]']")
 
                     match_summary["live_score_data"] = {
                         "sets": sets,
