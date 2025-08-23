@@ -4,8 +4,6 @@ import re
 import time
 from typing import List, Dict, Any
 
-from pygments.lexer import combined
-
 import config
 from lxml import etree as ET
 from lxml import html
@@ -100,7 +98,6 @@ class TenipoScraper:
             html_tree = html.fromstring(page_source)
 
             itf_matches = []
-            # Find all tournament headers that have the ITF logo first.
             itf_header_rows = html_tree.xpath(
                 "//tr[.//div[contains(@class, 'tournament_logo') and contains(@style, 'itf.png')]]")
 
@@ -110,15 +107,15 @@ class TenipoScraper:
                 return True, []
 
             for header_row in itf_header_rows:
-                # Get all the match rows that come after this header but before the next one.
-                match_rows = header_row.xpath(
-                    "./following-sibling::tr[count(preceding-sibling::tr[.//div[contains(@class, 'hlavicka_turnaja')]]) = count(preceding-sibling::tr)]")
-
                 name_element = header_row.xpath(".//span[@style='font-weight:bold;']")
                 tournament_name = name_element[0].text_content().strip() if name_element else "ITF Tournament"
 
-                for match_row in match_rows:
-                    # Extract the match ID from an element we know will be there.
+                # Process all sibling rows until we hit the next tournament header
+                for match_row in header_row.xpath("./following-sibling::tr"):
+                    # If this row is another header, we've finished this tournament block
+                    if match_row.find(".//div[contains(@class, 'hlavicka_turnaja')]") is not None:
+                        break
+
                     id_element = match_row.find(".//*[@id]")
                     if id_element is None: continue
 
@@ -184,7 +181,7 @@ class TenipoScraper:
 
             combined_data['point_by_point_html'] = self._scrape_html_pbp()
             combined_data['statistics_html'] = self._scrape_html_statistics()
-            return combined.data
+            return combined_data
         except Exception as e:
             logging.error(f"FATAL error in fetch_match_data for ID {match_id}: {e}", exc_info=True)
             return {}
