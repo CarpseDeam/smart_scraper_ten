@@ -99,24 +99,25 @@ class TenipoScraper:
 
             itf_matches = []
             for match_id, match_summary in final_matches_map.items():
-                # Find an anchor element to locate the match in the HTML
+                # --- START: CORRECTED FILTER LOGIC ---
+                # Use a reliable element with a known ID as an anchor to find the match's context.
                 anchor_element = html_tree.get_element_by_id(f'game11[{match_id}]', None)
                 if not anchor_element:
-                    continue
+                    continue  # If we can't find this, we can't process the match.
 
-                # From the anchor, find the preceding tournament header row
-                tournament_row = anchor_element.xpath("./ancestor::tr/preceding-sibling::tr[@class='tournament'][1]")
+                # From the anchor, navigate up to the parent row, then find the preceding tournament row.
+                tournament_row = anchor_element.xpath("./ancestor::tr[1]/preceding-sibling::tr[@class='tournament'][1]")
                 if not tournament_row:
                     continue
 
-                # Check if the logo in that header is the ITF logo
                 logo_div = tournament_row[0].find_class('tournament_logo')
                 if not logo_div:
                     continue
 
                 style = logo_div[0].get('style', '')
                 if 'itf.png' not in style:
-                    continue  # This is the definitive filter. If it's not ITF, we skip it.
+                    continue  # Definitive: Skip if not an ITF match.
+                # --- END: CORRECTED FILTER LOGIC ---
 
                 # --- If it IS an ITF match, parse the score ---
                 sets = []
