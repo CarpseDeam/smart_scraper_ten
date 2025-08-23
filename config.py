@@ -19,7 +19,7 @@ class Settings(BaseSettings):
 
     # --- Polling Settings ---
     CACHE_REFRESH_INTERVAL_SECONDS: int = Field(
-        default=5,
+        default=3,
         description="The interval in seconds between each poll for live match data."
     )
     CONCURRENT_SCRAPER_LIMIT: int = Field(

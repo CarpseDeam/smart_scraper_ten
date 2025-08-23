@@ -76,7 +76,7 @@ class TenipoScraper:
             return False, []
         try:
             self.driver.get(str(self.settings.LIVESCORE_PAGE_URL))
-            time.sleep(5)
+            time.sleep(3)
 
             all_xml_bodies = self._get_all_intercepted_xml_bodies()
             if not all_xml_bodies:
@@ -103,11 +103,9 @@ class TenipoScraper:
                 "//div[contains(@class, 'table_round')][.//div[contains(@class, 'tournament_logo') and contains(@style, 'itf.png')]]")
 
             for block in itf_tournament_blocks:
-                # Use .xpath() as it supports the 'contains' function. .find() does not.
                 name_elements = block.xpath(".//span[contains(@style, 'font-weight:bold')]")
                 tournament_name = name_elements[0].text_content().strip() if name_elements else "ITF Tournament"
 
-                # Use .xpath() for consistency and correctness.
                 match_tables = block.xpath(".//table[contains(@id, 'table')]")
                 for match_table in match_tables:
                     table_id = match_table.get('id', '')
@@ -124,12 +122,9 @@ class TenipoScraper:
                     match_summary['tournament_name'] = tournament_name
 
                     sets = []
-                    # The main livescore page uses '0' or '1' as a tab index in element IDs.
-                    # We must check for both to be robust.
                     tab_index_str = table_id[5] if len(table_id) > 5 and table_id.startswith("table") else "0"
 
                     for i in range(1, 6):
-                        # Construct ID with the correct tab index.
                         p1_id = f"set1{i}{tab_index_str}[{match_id}]"
                         p2_id = f"set2{i}{tab_index_str}[{match_id}]"
 
