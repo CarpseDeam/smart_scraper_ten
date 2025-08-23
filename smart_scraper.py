@@ -107,8 +107,11 @@ class TenipoScraper:
                 return True, []
 
             for header_row in itf_header_rows:
-                name_element = header_row.xpath(".//span[@style='font-weight:bold;']")
+                # --- START: ROBUST NAME EXTRACTION ---
+                # Use `contains` for the style to avoid issues with extra whitespace or other style attributes.
+                name_element = header_row.xpath(".//span[contains(@style, 'font-weight:bold')]")
                 tournament_name = name_element[0].text_content().strip() if name_element else "ITF Tournament"
+                # --- END: ROBUST NAME EXTRACTION ---
 
                 # Process all sibling rows until we hit the next tournament header
                 for match_row in header_row.xpath("./following-sibling::tr"):
