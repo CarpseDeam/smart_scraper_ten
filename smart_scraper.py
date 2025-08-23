@@ -4,6 +4,8 @@ import re
 import time
 from typing import List, Dict, Any
 
+from pygments.lexer import combined
+
 import config
 from lxml import etree as ET
 from lxml import html
@@ -98,51 +100,64 @@ class TenipoScraper:
             html_tree = html.fromstring(page_source)
 
             itf_matches = []
-            for match_id, match_summary in final_matches_map.items():
-                # --- START: CORRECTED FILTER LOGIC ---
-                # Use a reliable element with a known ID as an anchor to find the match's context.
-                anchor_element = html_tree.get_element_by_id(f'game11[{match_id}]', None)
-                if not anchor_element:
-                    continue  # If we can't find this, we can't process the match.
+            # Find all tournament headers that have the ITF logo first.
+            itf_header_rows = html_tree.xpath(
+                "//tr[.//div[contains(@class, 'tournament_logo') and contains(@style, 'itf.png')]]")
 
-                # From the anchor, navigate up to the parent row, then find the preceding tournament row.
-                tournament_row = anchor_element.xpath("./ancestor::tr[1]/preceding-sibling::tr[@class='tournament'][1]")
-                if not tournament_row:
-                    continue
+            if not itf_header_rows:
+                logging.info(
+                    f"Discovered {len(final_matches_map)} total matches, but found 0 ITF tournament headers on the page.")
+                return True, []
 
-                logo_div = tournament_row[0].find_class('tournament_logo')
-                if not logo_div:
-                    continue
+            for header_row in itf_header_rows:
+                # Get all the match rows that come after this header but before the next one.
+                match_rows = header_row.xpath(
+                    "./following-sibling::tr[count(preceding-sibling::tr[.//div[contains(@class, 'hlavicka_turnaja')]]) = count(preceding-sibling::tr)]")
 
-                style = logo_div[0].get('style', '')
-                if 'itf.png' not in style:
-                    continue  # Definitive: Skip if not an ITF match.
-                # --- END: CORRECTED FILTER LOGIC ---
+                name_element = header_row.xpath(".//span[@style='font-weight:bold;']")
+                tournament_name = name_element[0].text_content().strip() if name_element else "ITF Tournament"
 
-                # --- If it IS an ITF match, parse the score ---
-                sets = []
-                for i in range(1, 6):
-                    p1_el = html_tree.get_element_by_id(f'set1{i}1[{match_id}]', None)
-                    p2_el = html_tree.get_element_by_id(f'set2{i}1[{match_id}]', None)
-                    if p1_el is not None and p2_el is not None:
-                        sets.append({
-                            "p1": p1_el.text_content().strip(),
-                            "p2": p2_el.text_content().strip()
-                        })
-                    else:
-                        break
+                for match_row in match_rows:
+                    # Extract the match ID from an element we know will be there.
+                    id_element = match_row.find(".//*[@id]")
+                    if id_element is None: continue
 
-                p1_game_el = html_tree.get_element_by_id(f'game11[{match_id}]', None)
-                p2_game_el = html_tree.get_element_by_id(f'game21[{match_id}]', None)
+                    match_id_search = re.search(r'\[(\d+)\]', id_element.get('id', ''))
+                    if not match_id_search: continue
 
-                match_summary["live_score_data"] = {
-                    "sets": sets,
-                    "currentGame": {
-                        "p1": p1_game_el.text_content().strip() if p1_game_el is not None else None,
-                        "p2": p2_game_el.text_content().strip() if p2_game_el is not None else None,
+                    match_id = match_id_search.group(1)
+
+                    if match_id not in final_matches_map:
+                        continue
+
+                    match_summary = final_matches_map[match_id]
+                    match_summary['tournament_name'] = tournament_name
+
+                    sets = []
+                    for i in range(1, 6):
+                        p1_el = match_row.find(f".//td[@id='set1{i}1[{match_id}]']")
+                        p2_el = match_row.find(f".//td[@id='set2{i}1[{match_id}]']")
+                        if p1_el is not None and p2_el is not None:
+                            p1_text = p1_el.text_content().strip()
+                            p2_text = p2_el.text_content().strip()
+                            if p1_text or p2_text:
+                                sets.append({"p1": p1_text, "p2": p2_text})
+                            else:
+                                break
+                        else:
+                            break
+
+                    p1_game_el = match_row.find(f".//td[@id='game11[{match_id}]']")
+                    p2_game_el = match_row.find(f".//td[@id='game21[{match_id}]']")
+
+                    match_summary["live_score_data"] = {
+                        "sets": sets,
+                        "currentGame": {
+                            "p1": p1_game_el.text_content().strip() if p1_game_el is not None else None,
+                            "p2": p2_game_el.text_content().strip() if p2_game_el is not None else None,
+                        }
                     }
-                }
-                itf_matches.append(match_summary)
+                    itf_matches.append(match_summary)
 
             logging.info(
                 f"Discovered {len(final_matches_map)} total matches, filtered down to {len(itf_matches)} ITF matches.")
@@ -169,7 +184,7 @@ class TenipoScraper:
 
             combined_data['point_by_point_html'] = self._scrape_html_pbp()
             combined_data['statistics_html'] = self._scrape_html_statistics()
-            return combined_data
+            return combined.data
         except Exception as e:
             logging.error(f"FATAL error in fetch_match_data for ID {match_id}: {e}", exc_info=True)
             return {}
