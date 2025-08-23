@@ -169,72 +169,71 @@ def _parse_stats_string(stats_str: Any) -> list:
 def transform_match_data_to_client_format(raw_data: dict, summary_data: dict) -> dict:
     """
     Transforms the raw scraped data into the final format for the database and API,
-    intelligently consolidating multiple data sources and handling inconsistent keys.
+    enforcing a strict separation of data sources to prevent mixing.
     """
     if "match" not in raw_data:
         logging.warning("transform_match_data called with invalid raw_data format.")
         return {}
 
+    # --- SOURCE OF TRUTH ENFORCEMENT ---
+    # `summary_data` is ONLY for stable, high-level info (ID, tournament, players).
+    # `match_details` (from raw_data) is the SINGLE SOURCE OF TRUTH for all dynamic data (scores, stats, etc.).
     match_id = summary_data.get('id')
     match_details = raw_data.get("match", {})
     pbp_info = raw_data.get("point_by_point_html", [])
     stats_from_html = raw_data.get("statistics_html", [])
 
-    # Consolidate both data sources. Start with the summary and let the more specific
-    # match details overwrite it. The robust getter functions will find the correct
-    # data regardless of which source it came from.
-    consolidated_data = summary_data.copy()
-    consolidated_data.update(match_details)
-
+    # Use `summary_data` for player info as it's often more complete.
     p1_info = _parse_player_info(_safe_get_from_dict(summary_data, "player1", ""),
                                  _safe_get_from_dict(summary_data, "country1", ""))
     p2_info = _parse_player_info(_safe_get_from_dict(summary_data, "player2", ""),
                                  _safe_get_from_dict(summary_data, "country2", ""))
 
-    status = _determine_status(consolidated_data)
+    # --- ALL DYNAMIC DATA IS NOW PULLED EXCLUSIVELY FROM `match_details` ---
+    status = _determine_status(match_details)
 
-    # Build the sets list, now including tie-break scores
+    # Build the sets list from the reliable detailed source
     sets_list = []
     for i in range(1, 6):
-        p1_score = _to_int_score(_get_value_with_fallbacks(consolidated_data, [f"s{i}1", f"set{i}1"]))
-        p2_score = _to_int_score(_get_value_with_fallbacks(consolidated_data, [f"s{i}2", f"set{i}2"]))
+        p1_score = _to_int_score(_get_value_with_fallbacks(match_details, [f"s{i}1", f"set{i}1"]))
+        p2_score = _to_int_score(_get_value_with_fallbacks(match_details, [f"s{i}2", f"set{i}2"]))
 
         set_data = {"p1": p1_score, "p2": p2_score}
 
         # If it was a tie-break set, find the tie-break scores
         if p1_score + p2_score == 13:
-            p1_tb = _get_value_with_fallbacks(consolidated_data, [f"s{i}tb1", f"set{i}tb1"])
-            p2_tb = _get_value_with_fallbacks(consolidated_data, [f"s{i}tb2", f"set{i}tb2"])
+            p1_tb = _get_value_with_fallbacks(match_details, [f"s{i}tb1", f"set{i}tb1"])
+            p2_tb = _get_value_with_fallbacks(match_details, [f"s{i}tb2", f"set{i}tb2"])
             set_data["p1_tiebreak"] = _to_int_score(p1_tb) if p1_tb else None
             set_data["p2_tiebreak"] = _to_int_score(p2_tb) if p2_tb else None
 
         sets_list.append(set_data)
 
-    # Determine the definitive source for statistics
-    stats_from_xml = _parse_stats_string(_get_value_with_fallbacks(consolidated_data, ["stats", "statistics"], ""))
+    # Determine the definitive source for statistics, prioritizing the detailed source
+    stats_from_xml = _parse_stats_string(_get_value_with_fallbacks(match_details, ["stats", "statistics"], ""))
     final_statistics = stats_from_html if stats_from_html else stats_from_xml
 
     return {
         "match_url": f"https://tenipo.com/match/-/{match_id}",
         "tournament": _safe_get_from_dict(summary_data, "tournament_name", "N/A"),
-        "round": _parse_round_info(_safe_get_from_dict(consolidated_data, "round", "")).get("round_name"),
+        "round": _parse_round_info(_safe_get_from_dict(match_details, "round", "")).get("round_name"),
         "timePolled": datetime.now(timezone.utc).isoformat(),
         "players": [p1_info, p2_info],
         "score": {
             "sets": sets_list,
             "currentGame": {
-                "p1": _get_value_with_fallbacks(consolidated_data, ["game1", "point1"]),
-                "p2": _get_value_with_fallbacks(consolidated_data, ["game2", "point2"])
+                "p1": _get_value_with_fallbacks(match_details, ["game1", "point1"]),
+                "p2": _get_value_with_fallbacks(match_details, ["game2", "point2"])
             },
             "status": status
         },
         "matchInfo": {
-            "court": _safe_get_from_dict(consolidated_data, "court_name"),
-            "started": datetime.fromtimestamp(_to_int_score(_safe_get_from_dict(consolidated_data, "starttime")),
-                                              tz=timezone.utc).isoformat() if _safe_get_from_dict(consolidated_data,
+            "court": _safe_get_from_dict(match_details, "court_name"),
+            "started": datetime.fromtimestamp(_to_int_score(_safe_get_from_dict(match_details, "starttime")),
+                                              tz=timezone.utc).isoformat() if _safe_get_from_dict(match_details,
                                                                                                   "starttime") else None,
         },
         "statistics": final_statistics,
         "pointByPoint": _parse_point_by_point(pbp_info),
-        "h2h": _parse_h2h_string(_get_value_with_fallbacks(consolidated_data, ["h2h"], "")),
+        "h2h": _parse_h2h_string(_get_value_with_fallbacks(match_details, ["h2h"], "")),
     }
