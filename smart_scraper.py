@@ -5,6 +5,7 @@ import time
 from typing import List, Dict, Any
 
 import config
+from lxml import etree as ET
 from lxml import html
 from selenium import webdriver
 from selenium.common.exceptions import (WebDriverException, TimeoutException,
@@ -27,7 +28,6 @@ class TenipoScraper:
             logging.info("Initializing new Selenium driver...")
             self.driver = self._setup_driver()
 
-            # The interception script is still needed for the DETAIL page (match.xml)
             script_source = """
                 window.interceptedResponses = window.interceptedResponses || {};
                 const originalSend = XMLHttpRequest.prototype.send;
@@ -76,66 +76,60 @@ class TenipoScraper:
             return False, []
         try:
             self.driver.get(str(self.settings.LIVESCORE_PAGE_URL))
-            WebDriverWait(self.driver, 20).until(
-                EC.presence_of_element_located((By.XPATH, "//tr[contains(@id, 'match')]"))
-            )
-            logging.info("Main livescore page loaded. Parsing HTML for scores...")
+            time.sleep(5)  # Allow time for all XML feeds to be intercepted.
 
+            # --- STEP 1: Discover all matches using the original, STABLE XML interception method ---
+            all_xml_bodies = self._get_all_intercepted_xml_bodies()
+            if not all_xml_bodies:
+                logging.info("DISCOVERY: No XML data feeds were intercepted. The page is likely empty.")
+                return True, []
+
+            all_parsed_matches = []
+            parser = ET.XMLParser(recover=True, encoding='utf-8')
+            for xml_body in all_xml_bodies:
+                root = ET.fromstring(xml_body.encode('utf-8'), parser=parser)
+                if root is None: continue
+                for match_element in root.xpath('//match'):
+                    match_data = self._xml_to_dict(match_element)
+                    if 'id' in match_data:
+                        all_parsed_matches.append(match_data)
+
+            # Use a dictionary to ensure we only have unique matches
+            final_matches_map = {match['id']: match for match in all_parsed_matches}
+
+            # --- STEP 2: Scrape the page's HTML to get the CORRECT live scores ---
             page_source = self.driver.page_source
-            tree = html.fromstring(page_source)
-            match_rows = tree.xpath("//tr[contains(@id, 'match')]")
+            html_tree = html.fromstring(page_source)
 
-            all_matches_data = []
-            for row in match_rows:
-                # Use the ID of the first player row to get the match ID
-                player1_row = row
-                player2_row = row.getnext()
-                if player2_row is None: continue
-
-                match_id_search = re.search(r'match(\d+)', player1_row.get('id', ''))
-                if not match_id_search: continue
-                match_id = match_id_search.group(1)
-
-                p1_name = player1_row.find_class('player-name')
-                p2_name = player2_row.find_class('player-name')
-                tournament_element = row.xpath("./preceding-sibling::tr[@class='tournament'][1]//td/a")
-
-                if not p1_name or not p2_name: continue
-
-                # --- PARSE SCORE FROM HTML USING CORRECT MARKERS ---
+            # --- STEP 3: Combine the two sources ---
+            for match_id, match_summary in final_matches_map.items():
                 sets = []
                 for i in range(1, 6):  # Sets 1 through 5
-                    p1_set_score_el = tree.get_element_by_id(f'set1{i}1[{match_id}]', None)
-                    p2_set_score_el = tree.get_element_by_id(f'set2{i}1[{match_id}]', None)
-
-                    if p1_set_score_el is not None and p2_set_score_el is not None:
+                    p1_el = html_tree.get_element_by_id(f'set1{i}1[{match_id}]', None)
+                    p2_el = html_tree.get_element_by_id(f'set2{i}1[{match_id}]', None)
+                    if p1_el is not None and p2_el is not None:
                         sets.append({
-                            "p1": p1_set_score_el.text_content().strip(),
-                            "p2": p2_set_score_el.text_content().strip()
+                            "p1": p1_el.text_content().strip(),
+                            "p2": p2_el.text_content().strip()
                         })
                     else:
-                        break  # No more sets found
+                        break
 
-                p1_game_score_el = tree.get_element_by_id(f'game11[{match_id}]', None)
-                p2_game_score_el = tree.get_element_by_id(f'game21[{match_id}]', None)
+                p1_game_el = html_tree.get_element_by_id(f'game11[{match_id}]', None)
+                p2_game_el = html_tree.get_element_by_id(f'game21[{match_id}]', None)
 
-                summary = {
-                    "id": match_id,
-                    "player1": p1_name[0].text_content().strip(),
-                    "player2": p2_name[0].text_content().strip(),
-                    "tournament_name": tournament_element[0].text_content().strip() if tournament_element else "N/A",
-                    "live_score_data": {
-                        "sets": sets,
-                        "currentGame": {
-                            "p1": p1_game_score_el.text_content().strip() if p1_game_score_el is not None else None,
-                            "p2": p2_game_score_el.text_content().strip() if p2_game_score_el is not None else None,
-                        }
+                # Attach the reliable score to the discovered match object
+                match_summary["live_score_data"] = {
+                    "sets": sets,
+                    "currentGame": {
+                        "p1": p1_game_el.text_content().strip() if p1_game_el is not None else None,
+                        "p2": p2_game_el.text_content().strip() if p2_game_el is not None else None,
                     }
                 }
-                all_matches_data.append(summary)
 
-            logging.info(f"Successfully parsed live scores for {len(all_matches_data)} matches from the main page.")
-            return True, all_matches_data
+            final_match_list = list(final_matches_map.values())
+            logging.info(f"Successfully discovered {len(final_match_list)} matches and enriched with live HTML scores.")
+            return True, final_match_list
 
         except Exception as e:
             logging.error(f"Error in get_live_matches_summary: {e}", exc_info=True)
@@ -147,14 +141,13 @@ class TenipoScraper:
         logging.info(f"FETCHING DETAILS for match ID: {match_id}")
         try:
             self.driver.get(match_page_url)
-            # This XML is now only for H2H, round, court, etc. The score is ignored.
             main_xml_str = self._get_intercepted_xml_body(f"match{match_id}.xml", timeout=15)
             if not main_xml_str:
                 logging.warning(f"Did not intercept match.xml for details on {match_id}. Some data may be missing.")
-                return {"match": {}}  # Return empty to avoid crash
+                return {"match": {}}
 
-            parser = html.etree.XMLParser(recover=True, encoding='utf-8')
-            main_root = html.etree.fromstring(main_xml_str.encode('utf-8'), parser=parser)
+            parser = ET.XMLParser(recover=True, encoding='utf-8')
+            main_root = ET.fromstring(main_xml_str.encode('utf-8'), parser=parser)
             combined_data = {"match": self._xml_to_dict(main_root)}
 
             combined_data['point_by_point_html'] = self._scrape_html_pbp()
@@ -163,6 +156,32 @@ class TenipoScraper:
         except Exception as e:
             logging.error(f"FATAL error in fetch_match_data for ID {match_id}: {e}", exc_info=True)
             return {}
+
+    def _get_all_intercepted_xml_bodies(self) -> List[str]:
+        get_all_script = """
+            const responses = window.interceptedResponses || {};
+            const bodies = Object.values(responses);
+            const processedBodies = [];
+            window.interceptedResponses = {};
+            for (const body of bodies) {
+                try {
+                    const decoded = janko(body);
+                    processedBodies.push(decoded);
+                } catch (e) {
+                    if (typeof body === 'string' && body.trim().startsWith('<')) {
+                        processedBodies.push(body);
+                    }
+                }
+            }
+            return processedBodies;
+        """
+        try:
+            results = self.driver.execute_script(get_all_script)
+            logging.info(f"INTERCEPT: Successfully retrieved and processed {len(results)} XML feeds for discovery.")
+            return results
+        except WebDriverException as e:
+            logging.error(f"Could not execute script to get all XML bodies. Error: {e}")
+            return []
 
     def _get_intercepted_xml_body(self, url_pattern: str, timeout: int = 15) -> str | None:
         get_single_script = f"""
@@ -184,7 +203,7 @@ class TenipoScraper:
                 time.sleep(0.25)
         return None
 
-    def _xml_to_dict(self, element) -> dict:
+    def _xml_to_dict(self, element: ET.Element) -> dict:
         if element is None: return {}
         result = {}
         if element.attrib: result.update(element.attrib)
@@ -199,7 +218,6 @@ class TenipoScraper:
         return result
 
     def _scrape_html_pbp(self) -> List[Dict[str, Any]]:
-        # This function remains as it targets the detail page
         if self.driver is None: return []
         try:
             pbp_button = WebDriverWait(self.driver, 7).until(EC.element_to_be_clickable((By.ID, "buttonhistoryall")))
@@ -214,13 +232,12 @@ class TenipoScraper:
                 pbp_data.append({"game_header": score, "points_log": points})
             return pbp_data
         except (TimeoutException, StaleElementReferenceException, NoSuchElementException):
-            return []  # It's okay if this data doesn't exist.
+            return []
         except Exception as e:
             logging.error(f"An unexpected error occurred during PBP scraping: {e}", exc_info=True)
             return []
 
     def _scrape_html_statistics(self) -> List[Dict[str, Any]]:
-        # This function also remains as it targets the detail page
         if self.driver is None: return []
         try:
             stats_button = WebDriverWait(self.driver, 7).until(EC.element_to_be_clickable((By.ID, "buttonstatsall")))
