@@ -99,17 +99,16 @@ class TenipoScraper:
 
             itf_matches = []
 
-            # Find all top-level tournament containers that are explicitly ITF.
             itf_tournament_blocks = html_tree.xpath(
                 "//div[contains(@class, 'table_round')][.//div[contains(@class, 'tournament_logo') and contains(@style, 'itf.png')]]")
 
             for block in itf_tournament_blocks:
-                # Extract the tournament name from within this block.
-                name_element = block.find(".//span[contains(@style, 'font-weight:bold')]")
-                tournament_name = name_element.text_content().strip() if name_element is not None else "ITF Tournament"
+                # Use .xpath() as it supports the 'contains' function. .find() does not.
+                name_elements = block.xpath(".//span[contains(@style, 'font-weight:bold')]")
+                tournament_name = name_elements[0].text_content().strip() if name_elements else "ITF Tournament"
 
-                # Find all match tables within this same ITF block.
-                match_tables = block.findall(".//table[contains(@id, 'table')]")
+                # Use .xpath() for consistency and correctness.
+                match_tables = block.xpath(".//table[contains(@id, 'table')]")
                 for match_table in match_tables:
                     table_id = match_table.get('id', '')
                     match_id_search = re.search(r'\[(\d+)\]', table_id)
@@ -125,11 +124,17 @@ class TenipoScraper:
                     match_summary['tournament_name'] = tournament_name
 
                     sets = []
-                    # Assuming the tab index is always 0 for the main livescore page
-                    tab_index = 0
+                    # The main livescore page uses '0' or '1' as a tab index in element IDs.
+                    # We must check for both to be robust.
+                    tab_index_str = table_id[5] if len(table_id) > 5 and table_id.startswith("table") else "0"
+
                     for i in range(1, 6):
-                        p1_el = match_table.find(f".//td[@id='set1{i}{tab_index}[{match_id}]']")
-                        p2_el = match_table.find(f".//td[@id='set2{i}{tab_index}[{match_id}]']")
+                        # Construct ID with the correct tab index.
+                        p1_id = f"set1{i}{tab_index_str}[{match_id}]"
+                        p2_id = f"set2{i}{tab_index_str}[{match_id}]"
+
+                        p1_el = match_table.find(f".//td[@id='{p1_id}']")
+                        p2_el = match_table.find(f".//td[@id='{p2_id}']")
 
                         if p1_el is not None and p2_el is not None:
                             p1_text = p1_el.text_content().strip()
@@ -141,8 +146,8 @@ class TenipoScraper:
                         else:
                             break
 
-                    p1_game_el = match_table.find(f".//td[@id='game1{tab_index}[{match_id}]']")
-                    p2_game_el = match_table.find(f".//td[@id='game2{tab_index}[{match_id}]']")
+                    p1_game_el = match_table.find(f".//td[@id='game1{tab_index_str}[{match_id}]']")
+                    p2_game_el = match_table.find(f".//td[@id='game2{tab_index_str}[{match_id}]']")
 
                     match_summary["live_score_data"] = {
                         "sets": sets,
