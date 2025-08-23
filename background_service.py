@@ -111,8 +111,7 @@ class ScrapingService:
     async def _process_single_match(self, summary_data: dict):
         """Processes a single live match."""
         match_id = summary_data.get('id')
-        if "itf" not in summary_data.get('tournament_name', '').lower():
-            return
+        if not match_id: return # Should not happen with the new scraper, but a good guard.
 
         loop = asyncio.get_event_loop()
         worker = None

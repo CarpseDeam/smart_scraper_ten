@@ -76,9 +76,8 @@ class TenipoScraper:
             return False, []
         try:
             self.driver.get(str(self.settings.LIVESCORE_PAGE_URL))
-            time.sleep(5)  # Allow time for all XML feeds to be intercepted.
+            time.sleep(5)
 
-            # --- STEP 1: Discover all matches using the original, STABLE XML interception method ---
             all_xml_bodies = self._get_all_intercepted_xml_bodies()
             if not all_xml_bodies:
                 logging.info("DISCOVERY: No XML data feeds were intercepted. The page is likely empty.")
@@ -94,17 +93,34 @@ class TenipoScraper:
                     if 'id' in match_data:
                         all_parsed_matches.append(match_data)
 
-            # Use a dictionary to ensure we only have unique matches
             final_matches_map = {match['id']: match for match in all_parsed_matches}
-
-            # --- STEP 2: Scrape the page's HTML to get the CORRECT live scores ---
             page_source = self.driver.page_source
             html_tree = html.fromstring(page_source)
 
-            # --- STEP 3: Combine the two sources ---
+            itf_matches = []
             for match_id, match_summary in final_matches_map.items():
+                # Find an anchor element to locate the match in the HTML
+                anchor_element = html_tree.get_element_by_id(f'game11[{match_id}]', None)
+                if not anchor_element:
+                    continue
+
+                # From the anchor, find the preceding tournament header row
+                tournament_row = anchor_element.xpath("./ancestor::tr/preceding-sibling::tr[@class='tournament'][1]")
+                if not tournament_row:
+                    continue
+
+                # Check if the logo in that header is the ITF logo
+                logo_div = tournament_row[0].find_class('tournament_logo')
+                if not logo_div:
+                    continue
+
+                style = logo_div[0].get('style', '')
+                if 'itf.png' not in style:
+                    continue  # This is the definitive filter. If it's not ITF, we skip it.
+
+                # --- If it IS an ITF match, parse the score ---
                 sets = []
-                for i in range(1, 6):  # Sets 1 through 5
+                for i in range(1, 6):
                     p1_el = html_tree.get_element_by_id(f'set1{i}1[{match_id}]', None)
                     p2_el = html_tree.get_element_by_id(f'set2{i}1[{match_id}]', None)
                     if p1_el is not None and p2_el is not None:
@@ -118,7 +134,6 @@ class TenipoScraper:
                 p1_game_el = html_tree.get_element_by_id(f'game11[{match_id}]', None)
                 p2_game_el = html_tree.get_element_by_id(f'game21[{match_id}]', None)
 
-                # Attach the reliable score to the discovered match object
                 match_summary["live_score_data"] = {
                     "sets": sets,
                     "currentGame": {
@@ -126,10 +141,11 @@ class TenipoScraper:
                         "p2": p2_game_el.text_content().strip() if p2_game_el is not None else None,
                     }
                 }
+                itf_matches.append(match_summary)
 
-            final_match_list = list(final_matches_map.values())
-            logging.info(f"Successfully discovered {len(final_match_list)} matches and enriched with live HTML scores.")
-            return True, final_match_list
+            logging.info(
+                f"Discovered {len(final_matches_map)} total matches, filtered down to {len(itf_matches)} ITF matches.")
+            return True, itf_matches
 
         except Exception as e:
             logging.error(f"Error in get_live_matches_summary: {e}", exc_info=True)
