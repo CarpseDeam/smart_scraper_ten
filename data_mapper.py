@@ -1,5 +1,4 @@
 # data_mapper.py
-import logging
 import re
 from datetime import datetime, timezone
 from typing import Dict, Any, List
@@ -16,12 +15,13 @@ def _safe_get_from_dict(data, key, default=None):
 def _get_value_with_fallbacks(data: Dict, keys: List[str], default=None):
     """
     Safely get a value from a dictionary by trying a list of possible keys in order.
-    THE DEFINITIVE FIX: It now correctly returns values that are empty strings (""),
-    which represent a score of 0.
+    Returns the first non-empty value found.
     """
     for key in keys:
         if key in data:
-            return data[key]  # Return the value as-is, even if it's "" or None.
+            val = data.get(key)
+            if val is not None and val != "":
+                return val
     return default
 
 
@@ -42,58 +42,6 @@ def _to_int_score(value):
         return 0
 
 
-def _determine_status(match_info: Dict[str, Any]) -> str:
-    """
-    Determines the match status using a robust, multi-layered check.
-    This is the core fix to reliably detect completed matches.
-    """
-    # 1. Check for the explicit winner tag from the API.
-    winner_status = _safe_get_from_dict(match_info, "winner")
-    if winner_status and winner_status in ["1", "2"]:
-        logging.debug(f"Status determined by 'winner' tag: {winner_status}")
-        return "COMPLETED"
-
-    # 2. Check for explicit text-based statuses.
-    status_text = _safe_get_from_dict(match_info, "status", "").lower()
-    completed_keywords = ["finished", "retired", "walkover", "awarded", "cancelled"]
-    if any(keyword in status_text for keyword in completed_keywords):
-        logging.debug(f"Status determined by status text: '{status_text}'")
-        return "COMPLETED"
-
-    # 3. Calculate the winner from the set scores as a fallback.
-    p1_sets_won = 0
-    p2_sets_won = 0
-    for i in range(1, 6):  # Check up to 5 sets
-        p1_score = _to_int_score(_get_value_with_fallbacks(match_info, [f"s{i}1", f"set{i}1"]))
-        p2_score = _to_int_score(_get_value_with_fallbacks(match_info, [f"s{i}2", f"set{i}2"]))
-
-        if p1_score > p2_score:
-            p1_sets_won += 1
-        elif p2_score > p1_score:
-            p2_sets_won += 1
-
-    # Standard ITF matches are best-of-3 sets. A player needs 2 sets to win.
-    if p1_sets_won >= 2 or p2_sets_won >= 2:
-        logging.debug(f"Status determined by calculating set scores: P1 Sets={p1_sets_won}, P2 Sets={p2_sets_won}")
-        return "COMPLETED"
-
-    return "LIVE"
-
-
-def _parse_point_by_point(pbp_html_data: list) -> list:
-    """Parses the point-by-point data that was scraped from the page's HTML."""
-    if not pbp_html_data:
-        return []
-
-    client_pbp_data = []
-    for game_block in pbp_html_data:
-        client_pbp_data.append({
-            "game": game_block.get("game_header", ""),
-            "point_progression_log": game_block.get("points_log", [])
-        })
-    return client_pbp_data
-
-
 def _parse_player_info(player_str, country_str):
     """Parses player and country strings into a structured dict."""
     name = player_str.replace(" (Q)", "").replace(" (WC)", "").strip()
@@ -103,14 +51,16 @@ def _parse_player_info(player_str, country_str):
     return {"name": name, "country": country_code, "ranking": ranking}
 
 
-def _parse_round_info(round_str):
-    """Parses the round string for prize money and points."""
-    parts = round_str.split('-')
-    return {
-        "round_name": _safe_get_from_list(parts, 0),
-        "prize": _safe_get_from_list(parts, 1),
-        "points": _safe_get_from_list(parts, 2, default=0),
-    }
+def _parse_point_by_point(pbp_html_data: list) -> list:
+    """Parses the point-by-point data that was scraped from the page's HTML."""
+    if not pbp_html_data: return []
+    client_pbp_data = []
+    for game_block in pbp_html_data:
+        client_pbp_data.append({
+            "game": game_block.get("game_header", ""),
+            "point_progression_log": game_block.get("points_log", [])
+        })
+    return client_pbp_data
 
 
 def _parse_h2h_string(h2h_str: Any) -> list:
@@ -132,8 +82,7 @@ def _parse_h2h_string(h2h_str: Any) -> list:
 
 def _parse_stats_string(stats_str: Any) -> list:
     """Parses the dense stats string into the client's detailed format."""
-    if not isinstance(stats_str, str) or '/' not in stats_str:
-        return []
+    if not isinstance(stats_str, str) or '/' not in stats_str: return []
     STAT_MAP = {
         1: "Aces", 2: "Double Faults", 3: "1st Serve", 4: "1st Serve Points Won",
         5: "2nd Serve Points Won", 6: "Break Points Saved", 7: "Service Games Played",
@@ -142,8 +91,7 @@ def _parse_stats_string(stats_str: Any) -> list:
     }
     try:
         _, p1_stats_str, p2_stats_str = stats_str.split('/')
-        p1_vals = p1_stats_str.split(',')
-        p2_vals = p2_stats_str.split(',')
+        p1_vals, p2_vals = p1_stats_str.split(','), p2_stats_str.split(',')
     except ValueError:
         return []
 
@@ -151,12 +99,10 @@ def _parse_stats_string(stats_str: Any) -> list:
     for i in range(1, 12):
         stat_name = STAT_MAP.get(i)
         if not stat_name: continue
-        if i == 1:
-            p1_val, p2_val = _safe_get_from_list(p1_vals, 1, "0"), _safe_get_from_list(p1_vals, 0, "0")
-        else:
-            p1_val, p2_val = _safe_get_from_list(p1_vals, i, "0"), _safe_get_from_list(p2_vals, i, "0")
+        p1_val = _safe_get_from_list(p1_vals, i, "0") if i != 1 else _safe_get_from_list(p1_vals, 1, "0")
+        p2_val = _safe_get_from_list(p2_vals, i, "0") if i != 1 else _safe_get_from_list(p1_vals, 0, "0")
         stat_item = {"name": stat_name, "home": p1_val, "away": p2_val}
-        if "Serve" in stat_name or "Aces" in stat_name or "Double" in stat_name or "Games Played" in stat_name:
+        if "Serve" in stat_name or "Aces" in stat_name or "Double" in stat_name:
             service_stats.append(stat_item)
         else:
             return_stats.append(stat_item)
@@ -168,41 +114,35 @@ def _parse_stats_string(stats_str: Any) -> list:
 
 def transform_match_data_to_client_format(raw_data: dict, summary_data: dict) -> dict:
     """
-    Transforms the raw scraped data into the final format for the database and API,
-    enforcing a strict separation of data sources and handling live tiebreaks.
+    Transforms data from two distinct sources into the final client format.
+    - summary_data: From the main livescore page. The source of truth for the SCORE.
+    - raw_data: From the individual match page. The source of truth for DETAILS.
     """
-    if "match" not in raw_data:
-        logging.warning("transform_match_data called with invalid raw_data format.")
-        return {}
-
     match_id = summary_data.get('id')
-    match_details = raw_data.get("match", {})
+    match_details_xml = raw_data.get("match", {})
     pbp_info = raw_data.get("point_by_point_html", [])
     stats_from_html = raw_data.get("statistics_html", [])
 
-    p1_info = _parse_player_info(_safe_get_from_dict(summary_data, "player1", ""),
-                                 _safe_get_from_dict(summary_data, "country1", ""))
-    p2_info = _parse_player_info(_safe_get_from_dict(summary_data, "player2", ""),
-                                 _safe_get_from_dict(summary_data, "country2", ""))
+    p1_info = _parse_player_info(summary_data.get("player1", ""), "")
+    p2_info = _parse_player_info(summary_data.get("player2", ""), "")
 
-    status = _determine_status(match_details)
+    live_score = summary_data.get("live_score_data", {})
+    sets_from_summary = live_score.get("sets", [])
+    game_from_summary = live_score.get("currentGame", {})
 
     sets_list = []
-    for i in range(1, 6):
-        p1_score_raw = _get_value_with_fallbacks(match_details, [f"s{i}1", f"set{i}1"])
-        p2_score_raw = _get_value_with_fallbacks(match_details, [f"s{i}2", f"set{i}2"])
+    for i, s in enumerate(sets_from_summary):
+        set_num = i + 1
+        p1_score = _to_int_score(s.get("p1"))
+        p2_score = _to_int_score(s.get("p2"))
 
-        if p1_score_raw is None and p2_score_raw is None:
-            break
+        set_data = {"p1": p1_score, "p2": p2_score}
 
-        p1_score_int = _to_int_score(p1_score_raw)
-        p2_score_int = _to_int_score(p2_score_raw)
-        set_data = {"p1": p1_score_int, "p2": p2_score_int}
-
-        p1_tb_raw = _get_value_with_fallbacks(match_details, [f"s{i}tb1", f"set{i}tb1"])
-        p2_tb_raw = _get_value_with_fallbacks(match_details, [f"s{i}tb2", f"set{i}tb2"])
-
-        if p1_tb_raw is not None or p2_tb_raw is not None:
+        # --- TIEBREAK ENRICHMENT ---
+        # If the set was a tiebreak, enrich it with the score from the XML details.
+        if abs(p1_score - p2_score) == 1 and (p1_score == 7 or p2_score == 7):
+            p1_tb_raw = _get_value_with_fallbacks(match_details_xml, [f"s{set_num}tb1", f"set{set_num}tb1"])
+            p2_tb_raw = _get_value_with_fallbacks(match_details_xml, [f"s{set_num}tb2", f"set{set_num}tb2"])
             set_data["p1_tiebreak"] = _to_int_score(p1_tb_raw)
             set_data["p2_tiebreak"] = _to_int_score(p2_tb_raw)
         else:
@@ -211,40 +151,28 @@ def transform_match_data_to_client_format(raw_data: dict, summary_data: dict) ->
 
         sets_list.append(set_data)
 
-    if status == "LIVE" and not sets_list:
-        # The guardrail remains as a final safety measure, but will now run silently.
-        sets_list.append({"p1": 0, "p2": 0, "p1_tiebreak": None, "p2_tiebreak": None})
+    status = "LIVE"
 
-    last_active_set = sets_list[-1] if sets_list else {}
-    current_game_score = None
+    current_game_score = {
+        "p1": game_from_summary.get("p1"),
+        "p2": game_from_summary.get("p2")
+    }
     current_tiebreak_score = None
 
-    is_in_live_tiebreak = (
-            status == "LIVE"
-            and last_active_set.get("p1") == 6
-            and last_active_set.get("p2") == 6
-            and last_active_set.get("p1_tiebreak") is None
-            and last_active_set.get("p2_tiebreak") is None
-    )
+    last_set = sets_list[-1] if sets_list else {}
+    if last_set.get("p1") == 6 and last_set.get("p2") == 6:
+        current_tiebreak_score = current_game_score
+        current_game_score = None
 
-    if is_in_live_tiebreak:
-        current_tiebreak_score = {
-            "p1": _get_value_with_fallbacks(match_details, ["tb1", "tiebreak1"]),
-            "p2": _get_value_with_fallbacks(match_details, ["tb2", "tiebreak2"])
-        }
-    elif status == "LIVE":
-        current_game_score = {
-            "p1": _get_value_with_fallbacks(match_details, ["game1", "point1"]),
-            "p2": _get_value_with_fallbacks(match_details, ["game2", "point2"])
-        }
-
-    stats_from_xml = _parse_stats_string(_get_value_with_fallbacks(match_details, ["stats", "statistics"], ""))
+    h2h = _get_value_with_fallbacks(match_details_xml, ["h2h"], "")
+    stats_from_xml = _parse_stats_string(_get_value_with_fallbacks(match_details_xml, ["stats", "statistics"], ""))
     final_statistics = stats_from_html if stats_from_html else stats_from_xml
 
     return {
+        "_id": match_id,
         "match_url": f"https://tenipo.com/match/-/{match_id}",
-        "tournament": _safe_get_from_dict(summary_data, "tournament_name", "N/A"),
-        "round": _parse_round_info(_safe_get_from_dict(match_details, "round", "")).get("round_name"),
+        "tournament": summary_data.get("tournament_name", "N/A"),
+        "round": _safe_get_from_dict(match_details_xml, "round"),
         "timePolled": datetime.now(timezone.utc).isoformat(),
         "players": [p1_info, p2_info],
         "score": {
@@ -254,12 +182,12 @@ def transform_match_data_to_client_format(raw_data: dict, summary_data: dict) ->
             "status": status
         },
         "matchInfo": {
-            "court": _safe_get_from_dict(match_details, "court_name"),
-            "started": datetime.fromtimestamp(_to_int_score(_safe_get_from_dict(match_details, "starttime")),
-                                              tz=timezone.utc).isoformat() if _safe_get_from_dict(match_details,
+            "court": _safe_get_from_dict(match_details_xml, "court_name"),
+            "started": datetime.fromtimestamp(_to_int_score(_safe_get_from_dict(match_details_xml, "starttime")),
+                                              tz=timezone.utc).isoformat() if _safe_get_from_dict(match_details_xml,
                                                                                                   "starttime") else None,
         },
         "statistics": final_statistics,
         "pointByPoint": _parse_point_by_point(pbp_info),
-        "h2h": _parse_h2h_string(_get_value_with_fallbacks(match_details, ["h2h"], "")),
+        "h2h": _parse_h2h_string(h2h),
     }

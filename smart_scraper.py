@@ -1,21 +1,18 @@
 # smart_scraper.py
 import logging
-import os
-import shutil
-import uuid
-import json
+import re
 import time
-from lxml import etree as ET
 from typing import List, Dict, Any
 
 import config
+from lxml import html
 from selenium import webdriver
+from selenium.common.exceptions import (WebDriverException, TimeoutException,
+                                        NoSuchElementException, StaleElementReferenceException)
 from selenium.webdriver.chrome.options import Options
-from selenium.common.exceptions import WebDriverException, TimeoutException, NoSuchElementException, \
-    StaleElementReferenceException
 from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.ui import WebDriverWait
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -27,9 +24,10 @@ class TenipoScraper:
 
     def start_driver(self):
         if self.driver is None:
-            logging.info("Initializing new Selenium driver with JS interception...")
+            logging.info("Initializing new Selenium driver...")
             self.driver = self._setup_driver()
 
+            # The interception script is still needed for the DETAIL page (match.xml)
             script_source = """
                 window.interceptedResponses = window.interceptedResponses || {};
                 const originalSend = XMLHttpRequest.prototype.send;
@@ -39,9 +37,7 @@ class TenipoScraper:
                             if (this.responseURL && this.responseURL.includes('.xml')) {
                                 window.interceptedResponses[this.responseURL] = this.responseText;
                             }
-                        } catch (e) {
-                            console.error('Interception script error:', e);
-                        }
+                        } catch (e) { console.error('Interception script error:', e); }
                     });
                     originalSend.call(this, body);
                 };
@@ -50,23 +46,18 @@ class TenipoScraper:
 
     def _setup_driver(self) -> webdriver.Chrome:
         chrome_options = Options()
-
-        # --- DEFINITIVE STABILITY FIXES FOR CONTAINERIZED ENVIRONMENTS ---
         chrome_options.add_argument("--incognito")
         chrome_options.add_argument("--no-sandbox")
-        chrome_options.add_argument("--disable-dev-shm-usage") # CRITICAL for Docker/Railway
+        chrome_options.add_argument("--disable-dev-shm-usage")
         chrome_options.add_argument("--headless=new")
         chrome_options.add_argument("--disable-gpu")
         chrome_options.add_argument("--disable-extensions")
         chrome_options.add_argument("--mute-audio")
         chrome_options.add_argument("--remote-debugging-port=0")
         chrome_options.add_argument(f"user-agent={self.settings.USER_AGENT}")
-
-        # Performance tweak
         chrome_options.add_experimental_option(
             "prefs", {"profile.managed_default_content_settings.images": 2}
         )
-
         try:
             driver = webdriver.Chrome(options=chrome_options)
             driver.set_page_load_timeout(30)
@@ -80,120 +71,71 @@ class TenipoScraper:
             self.driver.quit()
             self.driver = None
 
-    def _get_intercepted_xml_body(self, url_pattern: str, timeout: int = 15) -> str | None:
-        get_single_script = f"""
-            const url = Object.keys(window.interceptedResponses || {{}}).find(k => k.includes('{url_pattern}'));
-            if (!url) return null;
-
-            const body = window.interceptedResponses[url];
-            delete window.interceptedResponses[url];
-
-            try {{
-                return janko(body);
-            }} catch (e) {{
-                if (typeof body === 'string' && body.trim().startsWith('<')) {{
-                    return body;
-                }}
-            }}
-            return null;
-        """
-        end_time = time.monotonic() + timeout
-        while time.monotonic() < end_time:
-            try:
-                result = self.driver.execute_script(get_single_script)
-                if result:
-                    logging.info(f"INTERCEPT: Successfully retrieved and processed data for '{url_pattern}'.")
-                    return result
-            except WebDriverException as e:
-                logging.warning(f"Could not execute script, browser may be navigating. Retrying... Error: {e}")
-            time.sleep(0.25)
-
-        logging.error(f"INTERCEPT TIMEOUT: Did not intercept a response for '{url_pattern}' after {timeout} seconds.")
-        return None
-
-    def _get_all_intercepted_xml_bodies(self) -> List[str]:
-        get_all_script = """
-            const responses = window.interceptedResponses || {};
-            const bodies = Object.values(responses);
-            const processedBodies = [];
-            window.interceptedResponses = {};
-
-            for (const body of bodies) {
-                try {
-                    const decoded = janko(body);
-                    processedBodies.push(decoded);
-                } catch (e) {
-                    if (typeof body === 'string' && body.trim().startsWith('<')) {
-                        processedBodies.push(body);
-                    }
-                }
-            }
-            return processedBodies;
-        """
-        try:
-            results = self.driver.execute_script(get_all_script)
-            logging.info(f"INTERCEPT: Successfully retrieved and processed {len(results)} XML feeds.")
-            return results
-        except WebDriverException as e:
-            logging.error(f"Could not execute script to get all XML bodies. Error: {e}")
-            return []
-
     def get_live_matches_summary(self) -> tuple[bool, List[Dict[str, Any]]]:
         if self.driver is None:
             return False, []
         try:
             self.driver.get(str(self.settings.LIVESCORE_PAGE_URL))
+            WebDriverWait(self.driver, 20).until(
+                EC.presence_of_element_located((By.XPATH, "//tr[contains(@id, 'match')]"))
+            )
+            logging.info("Main livescore page loaded. Parsing HTML for scores...")
 
-            # --- START: NEW ROBUST SCROLLING LOGIC ---
-            logging.info("Starting robust scroll to discover all lazy-loaded content...")
-            last_height = self.driver.execute_script("return document.body.scrollHeight")
-            scroll_attempts = 0
-            # Safety break (10 attempts) to prevent potential infinite loops on weird pages
-            while scroll_attempts < 10:
-                self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-                # Wait for new content to potentially load after scrolling
-                time.sleep(1)
-                new_height = self.driver.execute_script("return document.body.scrollHeight")
-                if new_height == last_height:
-                    logging.info("Page height has not changed, assuming all content is loaded.")
-                    break
-                last_height = new_height
-                scroll_attempts += 1
-                logging.info(f"Page height increased after scroll. Continuing... (Attempt {scroll_attempts})")
-            # --- END: NEW ROBUST SCROLLING LOGIC ---
+            page_source = self.driver.page_source
+            tree = html.fromstring(page_source)
+            match_rows = tree.xpath("//tr[contains(@id, 'match')]")
 
-            all_xml_bodies = self._get_all_intercepted_xml_bodies()
+            all_matches_data = []
+            for row in match_rows:
+                # Use the ID of the first player row to get the match ID
+                player1_row = row
+                player2_row = row.getnext()
+                if player2_row is None: continue
 
-            if not all_xml_bodies:
-                logging.warning("DISCOVERY: No XML data feeds were intercepted. The page might be empty or changed.")
-                return True, []
+                match_id_search = re.search(r'match(\d+)', player1_row.get('id', ''))
+                if not match_id_search: continue
+                match_id = match_id_search.group(1)
 
-            all_parsed_matches = []
-            parser = ET.XMLParser(recover=True, encoding='utf-8')
+                p1_name = player1_row.find_class('player-name')
+                p2_name = player2_row.find_class('player-name')
+                tournament_element = row.xpath("./preceding-sibling::tr[@class='tournament'][1]//td/a")
 
-            for i, xml_body in enumerate(all_xml_bodies):
-                root = ET.fromstring(xml_body.encode('utf-8'), parser=parser)
-                if root is None:
-                    continue
+                if not p1_name or not p2_name: continue
 
-                matches_in_feed = 0
-                for match_element in root.xpath('//match'):
-                    match_data = self._xml_to_dict(match_element)
-                    if 'id' in match_data and 'tournament_name' in match_data:
-                        all_parsed_matches.append(match_data)
-                        matches_in_feed += 1
-                logging.info(f"CONSOLIDATE: Parsed {matches_in_feed} matches from feed #{i + 1}.")
+                # --- PARSE SCORE FROM HTML USING CORRECT MARKERS ---
+                sets = []
+                for i in range(1, 6):  # Sets 1 through 5
+                    p1_set_score_el = tree.get_element_by_id(f'set1{i}1[{match_id}]', None)
+                    p2_set_score_el = tree.get_element_by_id(f'set2{i}1[{match_id}]', None)
 
-            final_matches_map = {match['id']: match for match in all_parsed_matches}
-            final_match_list = list(final_matches_map.values())
+                    if p1_set_score_el is not None and p2_set_score_el is not None:
+                        sets.append({
+                            "p1": p1_set_score_el.text_content().strip(),
+                            "p2": p2_set_score_el.text_content().strip()
+                        })
+                    else:
+                        break  # No more sets found
 
-            logging.info(
-                f"FINALIZED: A total of {len(final_match_list)} unique matches were parsed from all discovered feeds.")
+                p1_game_score_el = tree.get_element_by_id(f'game11[{match_id}]', None)
+                p2_game_score_el = tree.get_element_by_id(f'game21[{match_id}]', None)
 
-            if not final_match_list:
-                logging.warning("Scraper parsed 0 unique matches from all feeds. The site may be empty.")
+                summary = {
+                    "id": match_id,
+                    "player1": p1_name[0].text_content().strip(),
+                    "player2": p2_name[0].text_content().strip(),
+                    "tournament_name": tournament_element[0].text_content().strip() if tournament_element else "N/A",
+                    "live_score_data": {
+                        "sets": sets,
+                        "currentGame": {
+                            "p1": p1_game_score_el.text_content().strip() if p1_game_score_el is not None else None,
+                            "p2": p2_game_score_el.text_content().strip() if p2_game_score_el is not None else None,
+                        }
+                    }
+                }
+                all_matches_data.append(summary)
 
-            return True, final_match_list
+            logging.info(f"Successfully parsed live scores for {len(all_matches_data)} matches from the main page.")
+            return True, all_matches_data
 
         except Exception as e:
             logging.error(f"Error in get_live_matches_summary: {e}", exc_info=True)
@@ -202,17 +144,17 @@ class TenipoScraper:
     def fetch_match_data(self, match_id: str) -> Dict[str, Any]:
         if self.driver is None: return {}
         match_page_url = f"https://tenipo.com/match/-/{match_id}"
-        logging.info(f"FETCHING data for match ID: {match_id}")
+        logging.info(f"FETCHING DETAILS for match ID: {match_id}")
         try:
             self.driver.get(match_page_url)
-
+            # This XML is now only for H2H, round, court, etc. The score is ignored.
             main_xml_str = self._get_intercepted_xml_body(f"match{match_id}.xml", timeout=15)
             if not main_xml_str:
-                logging.error(f"Failed to get main match data for {match_id} via interception.")
-                return {}
+                logging.warning(f"Did not intercept match.xml for details on {match_id}. Some data may be missing.")
+                return {"match": {}}  # Return empty to avoid crash
 
-            parser = ET.XMLParser(recover=True, encoding='utf-8')
-            main_root = ET.fromstring(main_xml_str.encode('utf-8'), parser=parser)
+            parser = html.etree.XMLParser(recover=True, encoding='utf-8')
+            main_root = html.etree.fromstring(main_xml_str.encode('utf-8'), parser=parser)
             combined_data = {"match": self._xml_to_dict(main_root)}
 
             combined_data['point_by_point_html'] = self._scrape_html_pbp()
@@ -222,7 +164,27 @@ class TenipoScraper:
             logging.error(f"FATAL error in fetch_match_data for ID {match_id}: {e}", exc_info=True)
             return {}
 
-    def _xml_to_dict(self, element: ET.Element) -> dict:
+    def _get_intercepted_xml_body(self, url_pattern: str, timeout: int = 15) -> str | None:
+        get_single_script = f"""
+            const url = Object.keys(window.interceptedResponses || {{}}).find(k => k.includes('{url_pattern}'));
+            if (!url) return null;
+            const body = window.interceptedResponses[url];
+            delete window.interceptedResponses[url];
+            try {{ return janko(body); }}
+            catch (e) {{ if (typeof body === 'string' && body.trim().startsWith('<')) {{ return body; }} }}
+            return null;
+        """
+        end_time = time.monotonic() + timeout
+        while time.monotonic() < end_time:
+            try:
+                result = self.driver.execute_script(get_single_script)
+                if result:
+                    return result
+            except WebDriverException:
+                time.sleep(0.25)
+        return None
+
+    def _xml_to_dict(self, element) -> dict:
         if element is None: return {}
         result = {}
         if element.attrib: result.update(element.attrib)
@@ -237,142 +199,55 @@ class TenipoScraper:
         return result
 
     def _scrape_html_pbp(self) -> List[Dict[str, Any]]:
-        if self.driver is None:
-            return []
-
+        # This function remains as it targets the detail page
+        if self.driver is None: return []
         try:
-            pbp_button = WebDriverWait(self.driver, 10).until(
-                EC.element_to_be_clickable((By.ID, "buttonhistoryall"))
-            )
+            pbp_button = WebDriverWait(self.driver, 7).until(EC.element_to_be_clickable((By.ID, "buttonhistoryall")))
             self.driver.execute_script("arguments[0].click();", pbp_button)
-            WebDriverWait(self.driver, 10).until(
-                EC.presence_of_element_located((By.CLASS_NAME, "ohlavicka1"))
-            )
-
-            for attempt in range(3):
-                pbp_data = []
-                try:
-                    game_headers = self.driver.find_elements(By.CLASS_NAME, "ohlavicka1")
-                    game_point_blocks = self.driver.find_elements(By.CLASS_NAME, "sethistory")
-
-                    for header, block in zip(game_headers, game_point_blocks):
-                        try:
-                            score = header.find_element(By.CLASS_NAME, "ohlavicka3").text.strip()
-                            points_elements = block.find_elements(By.CLASS_NAME, "pointlogg")
-                            points = [p.text.strip().replace('\n', ' ') for p in points_elements]
-                            pbp_data.append({"game_header": score, "points_log": points})
-                        except NoSuchElementException:
-                            logging.debug("Skipping a PBP block that was missing expected elements.")
-                            continue
-
-                    return pbp_data
-
-                except StaleElementReferenceException:
-                    logging.warning(
-                        f"PBP scrape attempt {attempt + 1}/3 failed due to StaleElementReferenceException. Retrying...")
-                    if attempt < 2:
-                        time.sleep(0.5)
-                    else:
-                        logging.error("PBP scraping failed after 3 retries due to persistent staleness.")
-                        return []
-        except TimeoutException:
-            logging.info("No point-by-point data available or button not found for this match.")
-            return []
+            WebDriverWait(self.driver, 7).until(EC.presence_of_element_located((By.CLASS_NAME, "ohlavicka1")))
+            pbp_data = []
+            game_headers = self.driver.find_elements(By.CLASS_NAME, "ohlavicka1")
+            game_point_blocks = self.driver.find_elements(By.CLASS_NAME, "sethistory")
+            for header, block in zip(game_headers, game_point_blocks):
+                score = header.find_element(By.CLASS_NAME, "ohlavicka3").text.strip()
+                points = [p.text.strip().replace('\n', ' ') for p in block.find_elements(By.CLASS_NAME, "pointlogg")]
+                pbp_data.append({"game_header": score, "points_log": points})
+            return pbp_data
+        except (TimeoutException, StaleElementReferenceException, NoSuchElementException):
+            return []  # It's okay if this data doesn't exist.
         except Exception as e:
             logging.error(f"An unexpected error occurred during PBP scraping: {e}", exc_info=True)
             return []
 
-        return []
-
     def _scrape_html_statistics(self) -> List[Dict[str, Any]]:
-        if self.driver is None:
-            return []
+        # This function also remains as it targets the detail page
+        if self.driver is None: return []
         try:
-            # Step 1: Find the button using its correct ID and click it.
-            stats_button = WebDriverWait(self.driver, 10).until(
-                EC.element_to_be_clickable((By.ID, "buttonstatsall"))
-            )
+            stats_button = WebDriverWait(self.driver, 7).until(EC.element_to_be_clickable((By.ID, "buttonstatsall")))
             self.driver.execute_script("arguments[0].click();", stats_button)
-
-            # Step 2: Wait for the main statistics container to appear.
-            WebDriverWait(self.driver, 10).until(
-                EC.presence_of_element_located((By.ID, "stats"))
-            )
-
+            WebDriverWait(self.driver, 7).until(EC.presence_of_element_located((By.ID, "stats")))
             service_keywords = ["Aces", "Serve", "Faults", "Break Points"]
             service_stats, return_stats = [], []
-
-            # Step 3: Scrape the data using the correct class names.
-            # Retry loop to handle any dynamic content loading issues.
-            for attempt in range(3):
-                try:
-                    stat_rows = self.driver.find_elements(By.CLASS_NAME, "stat")
-                    if not stat_rows:
-                        time.sleep(0.5)
-                        continue
-
-                    # Clear lists to avoid duplicates on retry
-                    service_stats, return_stats = [], []
-
-                    for row in stat_rows:
-                        # Skip rows that are placeholders (e.g., Winners, Errors)
-                        if "opacity: 0.5" in row.get_attribute("style"):
-                            continue
-
-                        stat_name = row.find_element(By.CLASS_NAME, "stat_name").text.strip()
-                        value_elements = row.find_elements(By.CLASS_NAME, "stat_col")
-
-                        # Ensure we have at least two value columns before proceeding
-                        if len(value_elements) < 2:
-                            continue
-
-                        p1_val = value_elements[0].text.strip().replace("\n", " ")
-                        p2_val = value_elements[1].text.strip().replace("\n", " ")
-
-                        stat_item = {"name": stat_name, "home": p1_val, "away": p2_val}
-
-                        if any(keyword in stat_name for keyword in service_keywords):
-                            service_stats.append(stat_item)
-                        else:
-                            return_stats.append(stat_item)
-
-                    if service_stats or return_stats:
-                        logging.info(f"Successfully scraped {len(service_stats) + len(return_stats)} statistics rows.")
-                        return [
-                            {"groupName": "Service", "statisticsItems": service_stats},
-                            {"groupName": "Return", "statisticsItems": return_stats}
-                        ]
-                except StaleElementReferenceException:
-                    logging.warning(
-                        f"Stats scrape attempt {attempt + 1}/3 failed due to StaleElementReference. Retrying...")
-                    if attempt == 2:
-                        raise
-                    time.sleep(0.5)
-
-        except TimeoutException:
-            logging.info("Statistics tab/content not found for this match.")
+            stat_rows = self.driver.find_elements(By.CLASS_NAME, "stat")
+            for row in stat_rows:
+                if "opacity: 0.5" in row.get_attribute("style"): continue
+                stat_name = row.find_element(By.CLASS_NAME, "stat_name").text.strip()
+                value_elements = row.find_elements(By.CLASS_NAME, "stat_col")
+                if len(value_elements) < 2: continue
+                p1_val = value_elements[0].text.strip().replace("\n", " ")
+                p2_val = value_elements[1].text.strip().replace("\n", " ")
+                stat_item = {"name": stat_name, "home": p1_val, "away": p2_val}
+                if any(keyword in stat_name for keyword in service_keywords):
+                    service_stats.append(stat_item)
+                else:
+                    return_stats.append(stat_item)
+            if service_stats or return_stats:
+                return [
+                    {"groupName": "Service", "statisticsItems": service_stats},
+                    {"groupName": "Return", "statisticsItems": return_stats}
+                ]
+        except (TimeoutException, StaleElementReferenceException, NoSuchElementException):
+            return []
         except Exception as e:
             logging.error(f"An unexpected error occurred during statistics scraping: {e}", exc_info=True)
-
         return []
-
-    def investigate_data_sources(self, match_id: str):
-        if not self.driver:
-            logging.error("Cannot investigate, driver not started.")
-            return []
-
-        match_page_url = f"https://tenipo.com/match/-/{match_id}"
-        self.driver.get(match_page_url)
-
-        time.sleep(10)
-
-        script = "return Object.keys(window.interceptedResponses || {});"
-        urls = self.driver.execute_script(script)
-
-        logging.info(f"--- Investigation for Match ID {match_id} ---")
-        logging.info(f"Found {len(urls)} intercepted URLs:")
-        for url in urls:
-            logging.info(f"  - {url}")
-        logging.info("--- End of Investigation ---")
-
-        return urls
