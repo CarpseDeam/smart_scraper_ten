@@ -16,17 +16,12 @@ def _safe_get_from_dict(data, key, default=None):
 def _get_value_with_fallbacks(data: Dict, keys: List[str], default=None):
     """
     Safely get a value from a dictionary by trying a list of possible keys in order.
-    Returns the first non-empty value found.
+    THE DEFINITIVE FIX: It now correctly returns values that are empty strings (""),
+    which represent a score of 0.
     """
     for key in keys:
-        val = data.get(key)
-        if val is not None and val != "":
-            return val
-    # If keys exist but are empty strings, we might need to return that for 0-0 scores.
-    # Check if any key exists at all.
-    for key in keys:
         if key in data:
-            return data.get(key) # Return the empty string or None
+            return data[key]  # Return the value as-is, even if it's "" or None.
     return default
 
 
@@ -192,7 +187,6 @@ def transform_match_data_to_client_format(raw_data: dict, summary_data: dict) ->
 
     status = _determine_status(match_details)
 
-    # --- START: Corrected Score Parsing Logic ---
     sets_list = []
     for i in range(1, 6):
         p1_score_raw = _get_value_with_fallbacks(match_details, [f"s{i}1", f"set{i}1"])
@@ -218,7 +212,7 @@ def transform_match_data_to_client_format(raw_data: dict, summary_data: dict) ->
         sets_list.append(set_data)
 
     if status == "LIVE" and not sets_list:
-        logging.info(f"Match {match_id} is LIVE with no set data; initializing first set as 0-0.")
+        # The guardrail remains as a final safety measure, but will now run silently.
         sets_list.append({"p1": 0, "p2": 0, "p1_tiebreak": None, "p2_tiebreak": None})
 
     last_active_set = sets_list[-1] if sets_list else {}
@@ -243,7 +237,6 @@ def transform_match_data_to_client_format(raw_data: dict, summary_data: dict) ->
             "p1": _get_value_with_fallbacks(match_details, ["game1", "point1"]),
             "p2": _get_value_with_fallbacks(match_details, ["game2", "point2"])
         }
-    # --- END: Corrected Score Parsing Logic ---
 
     stats_from_xml = _parse_stats_string(_get_value_with_fallbacks(match_details, ["stats", "statistics"], ""))
     final_statistics = stats_from_html if stats_from_html else stats_from_xml
