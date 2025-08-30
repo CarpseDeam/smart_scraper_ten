@@ -112,11 +112,84 @@ def _parse_stats_string(stats_str: Any) -> list:
     ]
 
 
+def transform_summary_only_to_client_format(summary_data: dict) -> dict:
+    """
+    🏎️ FAST LANE: Transforms ONLY summary data for lightning-fast live score updates.
+    This creates the core match structure with live scores but leaves detailed fields empty.
+    The slow lane will enrich these later.
+    """
+    match_id = summary_data.get('id')
+    if not match_id:
+        return {}
+
+    # Parse player info from summary
+    p1_info = _parse_player_info(summary_data.get("player1", ""), "")
+    p2_info = _parse_player_info(summary_data.get("player2", ""), "")
+
+    # Get live score data from summary
+    live_score = summary_data.get("live_score_data", {})
+    sets_from_summary = live_score.get("sets", [])
+    game_from_summary = live_score.get("currentGame", {})
+
+    # Build sets list from summary data
+    sets_list = []
+    for i, s in enumerate(sets_from_summary):
+        set_num = i + 1
+        p1_score = _to_int_score(s.get("p1"))
+        p2_score = _to_int_score(s.get("p2"))
+
+        set_data = {
+            "p1": p1_score,
+            "p2": p2_score,
+            "p1_tiebreak": None,  # Will be enriched later if needed
+            "p2_tiebreak": None
+        }
+        sets_list.append(set_data)
+
+    # Handle current game vs tiebreak
+    current_game_score = {
+        "p1": game_from_summary.get("p1"),
+        "p2": game_from_summary.get("p2")
+    }
+    current_tiebreak_score = None
+
+    # Check if we're in a tiebreak (6-6 in last set)
+    last_set = sets_list[-1] if sets_list else {}
+    if last_set.get("p1") == 6 and last_set.get("p2") == 6:
+        current_tiebreak_score = current_game_score
+        current_game_score = None
+
+    return {
+        "_id": match_id,
+        "match_url": f"https://tenipo.com/match/-/{match_id}",
+        "tournament": summary_data.get("tournament_name", "N/A"),
+        "round": None,  # Will be enriched by slow lane
+        "timePolled": datetime.now(timezone.utc).isoformat(),
+        "players": [p1_info, p2_info],
+        "score": {
+            "sets": sets_list,
+            "currentGame": current_game_score,
+            "currentTiebreak": current_tiebreak_score,
+            "status": "LIVE"
+        },
+        "matchInfo": {
+            "court": None,  # Will be enriched by slow lane
+            "started": None,  # Will be enriched by slow lane
+        },
+        # These will be populated by the slow lane
+        "statistics": [],
+        "pointByPoint": [],
+        "h2h": [],
+        # Track data completeness
+        "hasDetailedData": False,
+        "detailedDataUpdated": None
+    }
+
+
 def transform_match_data_to_client_format(raw_data: dict, summary_data: dict) -> dict:
     """
-    Transforms data from two distinct sources into the final client format.
-    - summary_data: From the main livescore page. The source of truth for the SCORE.
-    - raw_data: From the individual match page. The source of truth for DETAILS.
+    🐌 SLOW LANE: Full transformation including detailed data.
+    This is the original function, kept for backward compatibility and slow lane enrichment.
     """
     match_id = summary_data.get('id')
     match_details_xml = raw_data.get("match", {})
@@ -138,8 +211,7 @@ def transform_match_data_to_client_format(raw_data: dict, summary_data: dict) ->
 
         set_data = {"p1": p1_score, "p2": p2_score}
 
-        # --- TIEBREAK ENRICHMENT ---
-        # If the set was a tiebreak, enrich it with the score from the XML details.
+        # TIEBREAK ENRICHMENT from detailed XML
         if abs(p1_score - p2_score) == 1 and (p1_score == 7 or p2_score == 7):
             p1_tb_raw = _get_value_with_fallbacks(match_details_xml, [f"s{set_num}tb1", f"set{set_num}tb1"])
             p2_tb_raw = _get_value_with_fallbacks(match_details_xml, [f"s{set_num}tb2", f"set{set_num}tb2"])
@@ -190,4 +262,6 @@ def transform_match_data_to_client_format(raw_data: dict, summary_data: dict) ->
         "statistics": final_statistics,
         "pointByPoint": _parse_point_by_point(pbp_info),
         "h2h": _parse_h2h_string(h2h),
+        "hasDetailedData": True,
+        "detailedDataUpdated": datetime.now(timezone.utc).isoformat()
     }

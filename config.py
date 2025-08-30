@@ -17,14 +17,25 @@ class Settings(BaseSettings):
     )
     USER_AGENT: str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
-    # --- Polling Settings ---
+    # --- Two-Speed Polling Settings ---
+    FAST_POLL_INTERVAL_SECONDS: int = Field(
+        default=4,
+        description="FAST LANE: Interval in seconds for lightning-fast live score updates."
+    )
+    SLOW_POLL_INTERVAL_SECONDS: int = Field(
+        default=45,
+        description="SLOW LANE: Interval in seconds for detailed data enrichment (stats, H2H, etc.)."
+    )
+
+    # --- Legacy Setting (for backward compatibility) ---
     CACHE_REFRESH_INTERVAL_SECONDS: int = Field(
         default=3,
-        description="The interval in seconds between each poll for live match data."
+        description="DEPRECATED: Use FAST_POLL_INTERVAL_SECONDS instead."
     )
+
     CONCURRENT_SCRAPER_LIMIT: int = Field(
         default=5,
-        description="The maximum number of scrapers to run at the same time. Tuned for the lighter selenium engine."
+        description="Maximum number of detail scrapers to run simultaneously for the slow lane."
     )
 
     # --- Database Settings ---

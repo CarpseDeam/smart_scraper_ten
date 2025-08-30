@@ -6,15 +6,10 @@ pydantic-settings
 httpx # Needed for FastAPI's TestClient
 lxml
 
-# For the browser-based scraper
-# CRITICAL FIX: Remove selenium-wire and use the much lighter, standard selenium
 selenium
 
-# CRITICAL DEPENDENCY FIX #1: Lock blinker for compatibility.
 blinker==1.7.0
 
-# CRITICAL DEPENDENCY FIX #2: Explicitly install setuptools.
 setuptools
 
-# DATABASE DEPENDENCIES
 pymongo
