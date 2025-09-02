@@ -126,7 +126,7 @@ class LeaderElector:
 elector = LeaderElector(app_settings, scraping_service, redis_client)
 
 @asynccontextmanager
-asyn def lifespan(app: FastAPI):
+async def lifespan(app: FastAPI):
     """Starts and stops the leader election process for the application."""
     await elector.start()
     yield
