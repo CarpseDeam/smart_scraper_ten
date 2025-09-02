@@ -74,16 +74,20 @@ class ScrapingService:
             logging.critical("ScrapingService failed - MongoDB connection issue.")
 
     async def stop(self):
-        """Gracefully stops both polling lanes and closes resources."""
+        """Gracefully stops both polling lanes and closes all resources for a clean shutdown."""
         logging.info("ScrapingService shutting down both speed lanes...")
 
         for task in [self.fast_polling_task, self.slow_polling_task]:
-            if task:
+            if task and not task.done():
                 task.cancel()
                 try:
                     await task
                 except asyncio.CancelledError:
                     logging.info("Polling task cancelled successfully.")
+
+        # Reset tasks to signify the service is fully stopped.
+        self.fast_polling_task = None
+        self.slow_polling_task = None
 
         loop = asyncio.get_event_loop()
         all_scrapers = self.all_workers + ([self.main_scraper] if self.main_scraper else [])
@@ -92,7 +96,17 @@ class ScrapingService:
 
         if self.mongo_manager:
             self.mongo_manager.close()
+
+        # Reset scraper resources for a clean restart
+        self.main_scraper = None
+        self.detail_scraper_pool = None
+        self.all_workers = []
+
         logging.info("ScrapingService shutdown complete.")
+
+    def is_running(self) -> bool:
+        """Checks if the scraping service's main polling tasks are active."""
+        return self.fast_polling_task is not None and self.slow_polling_task is not None
 
     async def _lightning_fast_score_updates(self):
         """

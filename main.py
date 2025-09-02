@@ -1,7 +1,6 @@
 # main.py
 import logging
 import asyncio
-import os
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -20,84 +19,134 @@ scraping_service = ScrapingService(app_settings)
 redis_client = redis.from_url(app_settings.REDIS_URL, encoding="utf-8", decode_responses=True)
 
 
-async def refresh_lock(lock_key: str, worker_id: str, ttl: int):
-    """Periodically refresh the TTL of the leader lock."""
-    while True:
-        await asyncio.sleep(ttl / 2)  # Refresh halfway through the TTL
-        try:
-            # Check if we are still the leader before refreshing
-            if await redis_client.get(lock_key) == worker_id:
-                await redis_client.expire(lock_key, ttl)
-                logging.info(f"WORKER {worker_id}: Refreshed leader lock.")
-            else:
-                logging.warning(f"WORKER {worker_id}: Lost leader lock. Stopping refresh task.")
-                break
-        except Exception as e:
-            logging.error(f"WORKER {worker_id}: Failed to refresh leader lock: {e}")
-            break
+class LeaderElector:
+    """Manages a continuous, self-healing leader election process for all workers."""
 
+    def __init__(self, settings, service, redis_client):
+        self.settings = settings
+        self.service = service
+        self.redis = redis_client
+        self.worker_id = str(uuid.uuid4())
+        self._main_task = None
+
+    async def start(self):
+        """Starts the main leader election loop."""
+        self._main_task = asyncio.create_task(self._election_loop())
+
+    async def stop(self):
+        """Stops the leader election loop and ensures graceful shutdown."""
+        if self._main_task:
+            self._main_task.cancel()
+            try:
+                await self._main_task
+            except asyncio.CancelledError:
+                pass
+        # Ensure service is stopped on shutdown
+        if self.service.is_running():
+            await self._demote_to_follower()
+
+    async def _election_loop(self):
+        """The main loop where each worker vies for leadership."""
+        logging.info(f"WORKER {self.worker_id}: Starting leader election loop.")
+        while True:
+            try:
+                # Attempt to acquire the leader lock
+                acquired = await self.redis.set(
+                    self.settings.LEADER_LOCK_KEY,
+                    self.worker_id,
+                    nx=True,  # Set only if it does not exist
+                    ex=self.settings.LEADER_LOCK_TTL_SECONDS  # Set with an expiration time
+                )
+
+                if acquired:
+                    # We won the election, promote to leader and run the service
+                    await self._run_as_leader()
+                else:
+                    # We lost, run as a follower and wait for the next chance
+                    await self._run_as_follower()
+
+            except asyncio.CancelledError:
+                logging.info(f"WORKER {self.worker_id}: Election loop cancelled.")
+                break
+            except Exception as e:
+                logging.error(f"WORKER {self.worker_id}: Unhandled error in election loop: {e}", exc_info=True)
+                if self.service.is_running():
+                    await self._demote_to_follower()
+                await asyncio.sleep(30)  # Wait longer after an error
+
+    async def _run_as_leader(self):
+        """Promotes to leader, starts the service, and refreshes the lock until it's lost."""
+        logging.warning(f"WORKER {self.worker_id}: Acquired lock. Promoting to LEADER.")
+        refresh_task = None
+        try:
+            await self.service.start()
+            refresh_task = asyncio.create_task(self._refresh_lock())
+            # This will block until the refresh task exits (i.e., the lock is lost)
+            await refresh_task
+        finally:
+            if refresh_task and not refresh_task.done():
+                refresh_task.cancel()
+            await self._demote_to_follower()
+
+    async def _run_as_follower(self):
+        """Logs status as follower and waits for a period before retrying for leadership."""
+        leader_id = await self.redis.get(self.settings.LEADER_LOCK_KEY)
+        logging.info(f"WORKER {self.worker_id}: Lock held by {leader_id}. Running as FOLLOWER. Will retry in 15s.")
+        await asyncio.sleep(15)
+
+    async def _demote_to_follower(self):
+        """Stops the service and cleans up resources upon losing leadership."""
+        logging.warning(f"WORKER {self.worker_id}: Demoting to FOLLOWER.")
+        await self.service.stop()
+        # Safely release the lock only if we are still the holder
+        if await self.redis.get(self.settings.LEADER_LOCK_KEY) == self.worker_id:
+            await self.redis.delete(self.settings.LEADER_LOCK_KEY)
+            logging.info(f"WORKER {self.worker_id}: Released lock during demotion.")
+
+    async def _refresh_lock(self):
+        """Periodically refreshes the lock's TTL. Exits if the lock is lost."""
+        while True:
+            try:
+                await asyncio.sleep(self.settings.LEADER_LOCK_TTL_SECONDS / 2)
+                # Atomically check if we are still the owner and refresh the TTL
+                if await self.redis.get(self.settings.LEADER_LOCK_KEY) == self.worker_id:
+                    await self.redis.expire(self.settings.LEADER_LOCK_KEY, self.settings.LEADER_LOCK_TTL_SECONDS)
+                else:
+                    logging.warning(f"LEADER {self.worker_id}: Lost lock. Stopping refresh.")
+                    break  # Exit loop to trigger demotion
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logging.error(f"LEADER {self.worker_id}: Failed to refresh lock: {e}")
+                break  # Exit loop to trigger demotion
+
+
+# --- Application Lifecycle ---
+
+elector = LeaderElector(app_settings, scraping_service, redis_client)
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
-    """
-    Manages the application's lifecycle with a Redis-based leader election system
-    to ensure only one worker runs the background scraping service.
-    """
-    worker_id = str(uuid.uuid4())
-    is_leader = False
-    lock_refresh_task = None
-
-    logging.info(f"WORKER {worker_id}: Starting up and participating in leader election.")
-
-    # --- Leader Election using Redis SETNX ---
-    is_leader = await redis_client.set(
-        app_settings.LEADER_LOCK_KEY,
-        worker_id,
-        nx=True,
-        ex=app_settings.LEADER_LOCK_TTL_SECONDS
-    )
-
-    if is_leader:
-        logging.warning(f"WORKER {worker_id}: Acquired lock. Promoting to LEADER.")
-        # Start a background task to keep the lock alive
-        lock_refresh_task = asyncio.create_task(
-            refresh_lock(app_settings.LEADER_LOCK_KEY, worker_id, app_settings.LEADER_LOCK_TTL_SECONDS)
-        )
-    else:
-        leader_id = await redis_client.get(app_settings.LEADER_LOCK_KEY)
-        logging.warning(f"WORKER {worker_id}: Lock already held by {leader_id}. Running as FOLLOWER.")
-
-    # --- Start/Stop logic for LEADER only ---
-    if is_leader:
-        logging.info("LEADER: Starting background service...")
-        await scraping_service.start()
-    else:
-        logging.info("FOLLOWER: Skipping background service startup.")
-
-    yield  # Application runs here
-
-    if is_leader:
-        logging.info("LEADER: Shutting down background service...")
-        if lock_refresh_task:
-            lock_refresh_task.cancel()
-        await scraping_service.stop()
-        try:
-            # Safely release the lock if we are still the holder
-            if await redis_client.get(app_settings.LEADER_LOCK_KEY) == worker_id:
-                await redis_client.delete(app_settings.LEADER_LOCK_KEY)
-                logging.info(f"LEADER {worker_id}: Lock released successfully.")
-        except Exception as e:
-            logging.error(f"LEADER {worker_id}: Failed to release lock: {e}")
-    else:
-        logging.info(f"FOLLOWER {worker_id}: Shutting down normally.")
+asyn def lifespan(app: FastAPI):
+    """Starts and stops the leader election process for the application."""
+    await elector.start()
+    yield
+    await elector.stop()
 
 
 app = FastAPI(title="Live Tennis Score API", lifespan=lifespan)
 
 
+# --- API Endpoints ---
+
 @app.get("/all_live_itf_data", status_code=status.HTTP_200_OK)
 async def get_all_live_itf_data():
     """Returns all live match data from the service's in-memory cache."""
+    if not elector.service.is_running():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="The scraping service is not currently running (no leader elected). Please try again in a moment."
+        )
+
     cache = scraping_service.live_data_cache
     last_updated = cache["last_updated"]
 
@@ -120,6 +169,12 @@ async def get_all_live_itf_data():
 @app.get("/match/{match_id}", status_code=status.HTTP_200_OK)
 async def get_match_data(match_id: str):
     """Returns data for a specific match from the service's cache."""
+    if not elector.service.is_running():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="The scraping service is not currently running (no leader elected). Please try again in a moment."
+        )
+
     match_data = scraping_service.live_data_cache["data"].get(match_id)
 
     if not match_data:
@@ -133,11 +188,8 @@ async def get_match_data(match_id: str):
 
 @app.get("/investigate/{match_id}", status_code=status.HTTP_200_OK)
 async def investigate_match(match_id: str):
-    """
-    A temporary debugging endpoint to find new data sources for a given match.
-    """
-    # This endpoint will only work if called on the leader process, which is fine for debugging.
-    if not scraping_service.main_scraper:
+    """A temporary debugging endpoint to find new data sources for a given match."""
+    if not elector.service.is_running():
         raise HTTPException(status_code=503, detail="Scraping service not active on this worker (it's a follower).")
 
     logging.info(f"Received investigation request for match ID: {match_id}")
