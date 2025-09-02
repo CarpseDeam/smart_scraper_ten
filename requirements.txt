@@ -7,9 +7,11 @@ httpx # Needed for FastAPI's TestClient
 lxml
 
 selenium
+webdriver-manager
 
 blinker==1.7.0
 
 setuptools
 
 pymongo
+redis

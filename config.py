@@ -47,6 +47,18 @@ class Settings(BaseSettings):
         default="edgeAI",
         description="The name of the database to use within MongoDB."
     )
+    
+    # --- Redis Settings for Leader Election ---
+    REDIS_URL: str = Field(
+        default="redis://localhost:6379",
+        description="URL for the Redis instance, used for distributed locking."
+    )
+    LEADER_LOCK_KEY: str = "scraper_leader_lock"
+    LEADER_LOCK_TTL_SECONDS: int = Field(
+        default=30,
+        description="TTL for the leader lock in Redis. Should be longer than the lock refresh interval."
+    )
+
 
     # --- Monitoring Settings (MUST be set in environment) ---
     TELEGRAM_BOT_TOKEN: str = Field(

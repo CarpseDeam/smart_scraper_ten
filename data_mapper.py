@@ -130,6 +130,7 @@ def transform_summary_only_to_client_format(summary_data: dict) -> dict:
     live_score = summary_data.get("live_score_data", {})
     sets_from_summary = live_score.get("sets", [])
     game_from_summary = live_score.get("currentGame", {})
+    serving_player = live_score.get("servingPlayer")
 
     # Build sets list from summary data
     sets_list = []
@@ -170,6 +171,7 @@ def transform_summary_only_to_client_format(summary_data: dict) -> dict:
             "sets": sets_list,
             "currentGame": current_game_score,
             "currentTiebreak": current_tiebreak_score,
+            "servingPlayer": serving_player,
             "status": "LIVE"
         },
         "matchInfo": {
@@ -202,6 +204,7 @@ def transform_match_data_to_client_format(raw_data: dict, summary_data: dict) ->
     live_score = summary_data.get("live_score_data", {})
     sets_from_summary = live_score.get("sets", [])
     game_from_summary = live_score.get("currentGame", {})
+    serving_player = live_score.get("servingPlayer")
 
     sets_list = []
     for i, s in enumerate(sets_from_summary):
@@ -251,6 +254,7 @@ def transform_match_data_to_client_format(raw_data: dict, summary_data: dict) ->
             "sets": sets_list,
             "currentGame": current_game_score,
             "currentTiebreak": current_tiebreak_score,
+            "servingPlayer": serving_player,
             "status": status
         },
         "matchInfo": {

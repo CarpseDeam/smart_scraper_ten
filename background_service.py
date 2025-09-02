@@ -104,7 +104,7 @@ class ScrapingService:
 
         while True:
             cycle_start = datetime.now(timezone.utc)
-            now = cycle_start  # Fix: Define now variable
+            now = cycle_start
             try:
                 if not self._components_ready():
                     await asyncio.sleep(self.FAST_POLL_INTERVAL)
@@ -170,7 +170,7 @@ class ScrapingService:
                 # Initialize detail worker pool on demand
                 await self._ensure_detail_worker_pool()
 
-                # Find matches needing detailed enrichment
+                # Find matches needing detailed enrichment using the efficient DB query
                 matches_needing_details = await self._identify_matches_needing_enrichment()
 
                 if matches_needing_details:
@@ -221,34 +221,14 @@ class ScrapingService:
             self.all_workers = []
 
     async def _identify_matches_needing_enrichment(self) -> List[str]:
-        """Identifies which matches need detailed data refresh."""
+        """
+        Identifies which matches need detailed data refresh by calling the efficient
+        database query.
+        """
+        if not self.mongo_manager:
+            return []
         loop = asyncio.get_event_loop()
-        current_matches = await loop.run_in_executor(None, self.mongo_manager.get_all_active_matches)
-
-        matches_needing_details = []
-        for match in current_matches:
-            if self._needs_detailed_refresh(match):
-                matches_needing_details.append(match['_id'])
-
-        return matches_needing_details
-
-    def _needs_detailed_refresh(self, match_data: Dict) -> bool:
-        """Determines if a match needs detailed data refresh."""
-        # Always refresh if missing detailed fields
-        if not match_data.get('statistics') and not match_data.get('h2h'):
-            return True
-
-        # Refresh if detailed data is stale (over 3 minutes)
-        detailed_timestamp = match_data.get('detailedDataUpdated')
-        if detailed_timestamp:
-            try:
-                last_detailed_update = datetime.fromisoformat(detailed_timestamp.replace('Z', '+00:00'))
-                age = datetime.now(timezone.utc) - last_detailed_update
-                return age > timedelta(minutes=3)
-            except:
-                return True
-
-        return True
+        return await loop.run_in_executor(None, self.mongo_manager.get_matches_needing_enrichment)
 
     async def _enrich_single_match_with_details(self, match_id: str):
         """Enriches a single match with detailed data."""
@@ -422,18 +402,6 @@ class ScrapingService:
             await loop.run_in_executor(None, self.archiver.archive_matches_by_ids, ids_to_archive)
             for match_id in ids_to_archive:
                 del self.quarantine_zone[match_id]
-
-    async def _rebuild_fast_cache(self):
-        """Rebuilds cache and runs monitoring checks."""
-        loop = asyncio.get_event_loop()
-        final_active_matches = await loop.run_in_executor(None, self.mongo_manager.get_all_active_matches)
-
-        new_cache_data = {match['_id']: match for match in final_active_matches}
-        self.live_data_cache["data"] = new_cache_data
-        self.live_data_cache["last_updated"] = datetime.now(timezone.utc)
-
-        if self.stall_monitor:
-            await self.stall_monitor.check_and_update_all(new_cache_data)
 
     async def _rebuild_fast_cache(self):
         """Rebuilds cache and runs monitoring checks."""

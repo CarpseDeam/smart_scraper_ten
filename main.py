@@ -2,9 +2,11 @@
 import logging
 import asyncio
 import os
+import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
+import redis.asyncio as redis
 from fastapi import FastAPI, HTTPException, status
 
 import config
@@ -13,29 +15,57 @@ from background_service import ScrapingService
 # --- Service Setup ---
 app_settings = config.Settings()
 scraping_service = ScrapingService(app_settings)
-LOCK_FILE = "/tmp/scraper_leader.lock"
+
+# --- Redis Client for Leader Election ---
+redis_client = redis.from_url(app_settings.REDIS_URL, encoding="utf-8", decode_responses=True)
+
+
+async def refresh_lock(lock_key: str, worker_id: str, ttl: int):
+    """Periodically refresh the TTL of the leader lock."""
+    while True:
+        await asyncio.sleep(ttl / 2)  # Refresh halfway through the TTL
+        try:
+            # Check if we are still the leader before refreshing
+            if await redis_client.get(lock_key) == worker_id:
+                await redis_client.expire(lock_key, ttl)
+                logging.info(f"WORKER {worker_id}: Refreshed leader lock.")
+            else:
+                logging.warning(f"WORKER {worker_id}: Lost leader lock. Stopping refresh task.")
+                break
+        except Exception as e:
+            logging.error(f"WORKER {worker_id}: Failed to refresh leader lock: {e}")
+            break
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
-    Manages the application's lifecycle with a leader election system
+    Manages the application's lifecycle with a Redis-based leader election system
     to ensure only one worker runs the background scraping service.
     """
-    worker_pid = os.getpid()
+    worker_id = str(uuid.uuid4())
     is_leader = False
+    lock_refresh_task = None
 
-    # --- Leader Election using a file lock ---
-    # This is an atomic operation: it will only succeed if the file does not exist.
-    try:
-        lock_fd = os.open(LOCK_FILE, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        os.write(lock_fd, str(worker_pid).encode())
-        os.close(lock_fd)
-        is_leader = True
-        logging.warning(f"WORKER {worker_pid}: Acquired lock. Promoting to LEADER.")
-    except FileExistsError:
-        logging.warning(f"WORKER {worker_pid}: Lock file exists. Running as FOLLOWER.")
-        is_leader = False
+    logging.info(f"WORKER {worker_id}: Starting up and participating in leader election.")
+
+    # --- Leader Election using Redis SETNX ---
+    is_leader = await redis_client.set(
+        app_settings.LEADER_LOCK_KEY,
+        worker_id,
+        nx=True,
+        ex=app_settings.LEADER_LOCK_TTL_SECONDS
+    )
+
+    if is_leader:
+        logging.warning(f"WORKER {worker_id}: Acquired lock. Promoting to LEADER.")
+        # Start a background task to keep the lock alive
+        lock_refresh_task = asyncio.create_task(
+            refresh_lock(app_settings.LEADER_LOCK_KEY, worker_id, app_settings.LEADER_LOCK_TTL_SECONDS)
+        )
+    else:
+        leader_id = await redis_client.get(app_settings.LEADER_LOCK_KEY)
+        logging.warning(f"WORKER {worker_id}: Lock already held by {leader_id}. Running as FOLLOWER.")
 
     # --- Start/Stop logic for LEADER only ---
     if is_leader:
@@ -48,14 +78,18 @@ async def lifespan(app: FastAPI):
 
     if is_leader:
         logging.info("LEADER: Shutting down background service...")
+        if lock_refresh_task:
+            lock_refresh_task.cancel()
         await scraping_service.stop()
         try:
-            os.remove(LOCK_FILE)
-            logging.info(f"LEADER {worker_pid}: Lock file removed successfully.")
-        except OSError as e:
-            logging.error(f"LEADER {worker_pid}: Failed to remove lock file: {e}")
+            # Safely release the lock if we are still the holder
+            if await redis_client.get(app_settings.LEADER_LOCK_KEY) == worker_id:
+                await redis_client.delete(app_settings.LEADER_LOCK_KEY)
+                logging.info(f"LEADER {worker_id}: Lock released successfully.")
+        except Exception as e:
+            logging.error(f"LEADER {worker_id}: Failed to release lock: {e}")
     else:
-        logging.info(f"FOLLOWER {worker_pid}: Shutting down normally.")
+        logging.info(f"FOLLOWER {worker_id}: Shutting down normally.")
 
 
 app = FastAPI(title="Live Tennis Score API", lifespan=lifespan)

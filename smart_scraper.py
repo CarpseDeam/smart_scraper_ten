@@ -126,7 +126,8 @@ class TenipoScraper:
                     match_summary['tournament_name'] = tournament_name
 
                     sets = []
-                    tab_index_str = table_id[5] if len(table_id) > 5 and table_id.startswith("table") else "0"
+                    # Extract tab index from table ID like "table1[560416]" -> "1"
+                    tab_index_str = table_id[5] if len(table_id) > 5 and table_id.startswith("table") and table_id[5].isdigit() else "1"
 
                     for i in range(1, 6):
                         p1_id = f"set1{i}{tab_index_str}[{match_id}]"
@@ -148,12 +149,27 @@ class TenipoScraper:
                     p1_game_el = match_table.find(f".//td[@id='game1{tab_index_str}[{match_id}]']")
                     p2_game_el = match_table.find(f".//td[@id='game2{tab_index_str}[{match_id}]']")
 
+                    # Extract serving indicator - pattern: serve10[match_id] and serve20[match_id]
+                    p1_serve_el = match_table.find(f".//td[@id='serve10[{match_id}]']")
+                    p2_serve_el = match_table.find(f".//td[@id='serve20[{match_id}]']")
+                    
+                    serving_player = None
+                    if p1_serve_el is not None:
+                        serve_div = p1_serve_el.find(".//div")
+                        if serve_div is not None and "servey" in serve_div.get("class", ""):
+                            serving_player = 1
+                    if p2_serve_el is not None:
+                        serve_div = p2_serve_el.find(".//div")
+                        if serve_div is not None and "servey" in serve_div.get("class", ""):
+                            serving_player = 2
+
                     match_summary["live_score_data"] = {
                         "sets": sets,
                         "currentGame": {
                             "p1": p1_game_el.text_content().strip() if p1_game_el is not None else None,
                             "p2": p2_game_el.text_content().strip() if p2_game_el is not None else None,
-                        }
+                        },
+                        "servingPlayer": serving_player
                     }
                     itf_matches.append(match_summary)
 
