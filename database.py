@@ -62,15 +62,15 @@ class MongoManager:
     def upsert_fast_data(self, match_id: str, fast_data: dict):
         """
         🏎️ FAST LANE: Atomically upserts live score data using a single update_one operation.
-        This prevents race conditions by ensuring the database write is a single operation.
-        - $set: Updates live score data on every call.
-        - $setOnInsert: Initializes the document with all data, including placeholders for detailed info, only when it's first created.
+        This prevents race conditions and field conflicts by separating fields for creation and update.
+        - $set: Updates live score data on every call for existing documents.
+        - $setOnInsert: Initializes the document with fields that are not updated on every call, only when it's first created.
         """
         if self.client is None: return
         try:
             matches_collection = self.db["tenipo"]
 
-            # Fields that are always updated (the "fast" data from the summary page)
+            # Fields that are always updated (the "live" data)
             set_fields = {
                 "timePolled": fast_data["timePolled"],
                 "score": fast_data["score"],
@@ -78,9 +78,14 @@ class MongoManager:
                 "players": fast_data["players"]
             }
 
-            # On initial insert, create the full document from the summary data.
-            # The slow lane will enrich the other fields later.
-            set_on_insert_fields = fast_data
+            # Fields that are only set on initial document creation.
+            # We start with the full data and remove the keys that are in `$set` to avoid conflicts.
+            set_on_insert_fields = fast_data.copy()
+            for key in set_fields.keys():
+                set_on_insert_fields.pop(key, None)
+            
+            # The _id is used in the filter, not the update operation.
+            set_on_insert_fields.pop("_id", None)
 
             result = matches_collection.update_one(
                 {"_id": match_id},
