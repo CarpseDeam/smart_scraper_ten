@@ -203,28 +203,47 @@ class TenipoScraper:
 
     def fetch_match_data(self, match_id: str) -> Dict[str, Any]:
         """
-        🐌 SLOW LANE: Fetches detailed match data from individual match pages.
-        Only called by the slow polling task for enrichment.
+        Fetches detailed match data, preferring XML sources over HTML scraping.
         """
         if self.driver is None: return {}
         match_page_url = f"https://tenipo.com/match/-/{match_id}"
-        logging.info(f"🐌 FETCHING DETAILS for match ID: {match_id}")
+        logging.info(f"FETCHING DETAILS for match ID: {match_id}")
         try:
             self.driver.get(match_page_url)
-            main_xml_str = self._get_intercepted_xml_body(f"match{match_id}.xml", timeout=15)
-            if not main_xml_str:
-                logging.warning(f"🐌 No match.xml intercepted for {match_id}")
-                return {"match": {}}
 
-            parser = ET.XMLParser(recover=True, encoding='utf-8')
-            main_root = ET.fromstring(main_xml_str.encode('utf-8'), parser=parser)
-            combined_data = {"match": self._xml_to_dict(main_root)}
+            # Main match data from XML
+            main_xml_str = self._get_intercepted_xml_body(f"match{match_id}.xml", timeout=10)
+            if main_xml_str:
+                parser = ET.XMLParser(recover=True, encoding='utf-8')
+                main_root = ET.fromstring(main_xml_str.encode('utf-8'), parser=parser)
+                combined_data = {"match": self._xml_to_dict(main_root)}
+            else:
+                logging.warning(f"No match.xml intercepted for {match_id}")
+                combined_data = {"match": {"id": match_id}}  # Create a base dict
 
-            combined_data['point_by_point_html'] = self._scrape_html_pbp()
-            combined_data['statistics_html'] = self._scrape_html_statistics()
+            # Point-by-point data: Try XML first, then fall back to HTML
+            pbp_xml_str = self._get_intercepted_xml_body(f"history{match_id}.xml", timeout=5)
+            if pbp_xml_str:
+                logging.info(f"Found history{match_id}.xml. Parsing PBP from XML.")
+                pbp_root = ET.fromstring(pbp_xml_str.encode('utf-8'), parser=ET.XMLParser(recover=True, encoding='utf-8'))
+                combined_data['point_by_point'] = self._xml_to_dict(pbp_root)
+            else:
+                logging.info(f"history{match_id}.xml not found. Falling back to HTML scraping for PBP.")
+                combined_data['point_by_point_html'] = self._scrape_html_pbp()
+
+            # Statistics data: Try XML first, then fall back to HTML
+            stats_xml_str = self._get_intercepted_xml_body(f"statistic{match_id}.xml", timeout=5)
+            if stats_xml_str:
+                logging.info(f"Found statistic{match_id}.xml. Parsing stats from XML.")
+                stats_root = ET.fromstring(stats_xml_str.encode('utf-8'), parser=ET.XMLParser(recover=True, encoding='utf-8'))
+                combined_data['statistics'] = self._xml_to_dict(stats_root)
+            else:
+                logging.info(f"statistic{match_id}.xml not found. Falling back to HTML scraping for stats.")
+                combined_data['statistics_html'] = self._scrape_html_statistics()
+
             return combined_data
         except Exception as e:
-            logging.error(f"🐌 FATAL error fetching details for {match_id}: {e}", exc_info=True)
+            logging.error(f"FATAL error fetching details for {match_id}: {e}", exc_info=True)
             return {}
 
     def _get_all_intercepted_xml_bodies(self) -> List[str]:
@@ -293,7 +312,7 @@ class TenipoScraper:
         """Scrapes point-by-point data from HTML."""
         if self.driver is None: return []
         try:
-            pbp_button = WebDriverWait(self.driver, 7).until(EC.element_to_be_clickable((By.ID, "buttonhistoryall")))
+            pbp_button = WebDriverWait(self.driver, 7).until(EC.element_to_be_clickable((By.CSS_SELECTOR, "[id*='buttonhistoryall']")))
             self.driver.execute_script("arguments[0].click();", pbp_button)
             WebDriverWait(self.driver, 7).until(EC.presence_of_element_located((By.CLASS_NAME, "ohlavicka1")))
             pbp_data = []
@@ -304,7 +323,8 @@ class TenipoScraper:
                 points = [p.text.strip().replace('\n', ' ') for p in block.find_elements(By.CLASS_NAME, "pointlogg")]
                 pbp_data.append({"game_header": score, "points_log": points})
             return pbp_data
-        except (TimeoutException, StaleElementReferenceException, NoSuchElementException):
+        except (TimeoutException, StaleElementReferenceException, NoSuchElementException) as e:
+            logging.warning(f"Failed to scrape PBP from HTML ({e.__class__.__name__}). Website structure may have changed.")
             return []
         except Exception as e:
             logging.error(f"Error during PBP scraping: {e}", exc_info=True)
@@ -314,7 +334,7 @@ class TenipoScraper:
         """Scrapes statistics data from HTML."""
         if self.driver is None: return []
         try:
-            stats_button = WebDriverWait(self.driver, 7).until(EC.element_to_be_clickable((By.ID, "buttonstatsall")))
+            stats_button = WebDriverWait(self.driver, 7).until(EC.element_to_be_clickable((By.CSS_SELECTOR, "[id*='buttonstatsall']")))
             self.driver.execute_script("arguments[0].click();", stats_button)
             WebDriverWait(self.driver, 7).until(EC.presence_of_element_located((By.ID, "stats")))
             service_keywords = ["Aces", "Serve", "Faults", "Break Points"]
@@ -337,7 +357,8 @@ class TenipoScraper:
                     {"groupName": "Service", "statisticsItems": service_stats},
                     {"groupName": "Return", "statisticsItems": return_stats}
                 ]
-        except (TimeoutException, StaleElementReferenceException, NoSuchElementException):
+        except (TimeoutException, StaleElementReferenceException, NoSuchElementException) as e:
+            logging.warning(f"Failed to scrape statistics from HTML ({e.__class__.__name__}). Website structure may have changed.")
             return []
         except Exception as e:
             logging.error(f"Error during statistics scraping: {e}", exc_info=True)
