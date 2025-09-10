@@ -139,7 +139,9 @@ class MongoManager:
                     # Condition 1: Never been enriched
                     {"detailedDataUpdated": {"$exists": False}},
                     # Condition 2: Enriched a while ago, making it stale
-                    {"detailedDataUpdated": {"$lt": stale_timestamp.isoformat()}}
+                    {"detailedDataUpdated": {"$lt": stale_timestamp.isoformat()}},
+                    # Condition 3: Explicitly set to None by fast lane
+                    {"detailedDataUpdated": None}
                 ]
             }
             matches = self.db["tenipo"].find(query, {"_id": 1})
