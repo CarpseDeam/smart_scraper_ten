@@ -312,8 +312,6 @@ class TenipoScraper:
         """Scrapes point-by-point data from HTML."""
         if self.driver is None: return []
         try:
-            pbp_button = WebDriverWait(self.driver, 7).until(EC.element_to_be_clickable((By.CSS_SELECTOR, "[id*='buttonhistoryall']")))
-            self.driver.execute_script("arguments[0].click();", pbp_button)
             WebDriverWait(self.driver, 7).until(EC.presence_of_element_located((By.CLASS_NAME, "ohlavicka1")))
             pbp_data = []
             game_headers = self.driver.find_elements(By.CLASS_NAME, "ohlavicka1")
@@ -322,6 +320,7 @@ class TenipoScraper:
                 score = header.find_element(By.CLASS_NAME, "ohlavicka3").text.strip()
                 points = [p.text.strip().replace('\n', ' ') for p in block.find_elements(By.CLASS_NAME, "pointlogg")]
                 pbp_data.append({"game_header": score, "points_log": points})
+            logging.info(f"Successfully scraped {len(pbp_data)} PBP blocks from HTML.")
             return pbp_data
         except (TimeoutException, StaleElementReferenceException, NoSuchElementException) as e:
             logging.warning(f"Failed to scrape PBP from HTML ({e.__class__.__name__}). Website structure may have changed.")
