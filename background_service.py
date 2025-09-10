@@ -303,6 +303,8 @@ class ScrapingService:
         if match_details_xml.get("round"):
             enhanced_match["round"] = match_details_xml["round"]
 
+        # Mark that this match now has detailed data
+        enhanced_match["hasDetailedData"] = True
         # Mark when detailed data was last updated
         enhanced_match["detailedDataUpdated"] = datetime.now(timezone.utc).isoformat()
 
